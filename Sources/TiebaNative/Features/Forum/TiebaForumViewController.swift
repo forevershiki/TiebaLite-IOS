@@ -39,14 +39,14 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   private var likeMirror: [String: Bool] = [:]
   /// 吧默认排序只播种一次（进新吧会话）。
   private var didSeedSort = false
-  private var isLoading = false
-  private var isLoadingMore = false
-  /// 在途（tab, page）集合：同一份请求不重复发（见 load 的开头守卫）。
-  private struct LoadKey: Hashable {
+  private struct LoadKey: Equatable, Sendable {
     let tab: Int
     let page: Int
+    let sort: Int
+    let classifyId: String?
   }
-  private var inFlightLoads: Set<LoadKey> = []
+  private var pageLoad: (key: LoadKey, task: Task<Void, Never>)?
+  private var loadMoreTask: Task<Void, Never>?
   private var isUserRefresh = false
   private var loadSeq = 0
   /// 行页发布（页键守卫 + 整页后台测量都收敛在 driver）。
@@ -74,6 +74,11 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  deinit {
+    pageLoad?.task.cancel()
+    loadMoreTask?.cancel()
+  }
 
   // MARK: - 生命周期
 
@@ -162,6 +167,15 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     (parent as? TiebaRouteHostViewController)?.syncNativeScreenChrome()
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    // 出栈的是宿主。打开帖子或弹出全屏页面时，宿主仍在导航栈内。
+    guard let host = parent as? TiebaRouteHostViewController,
+          host.isMovingFromParent || host.navigationController == nil else { return }
+    pageLoad?.task.cancel()
+    loadMoreTask?.cancel()
   }
 
   override func viewDidLayoutSubviews() {
@@ -310,42 +324,38 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
       showState(.error("缺少吧名"))
       return
     }
-    // 同 (tab, page) 已有在途请求就别再发：连点刷新/切分段回来时原来会整串重发，
-    // 只有 loadSeq 在事后丢旧响应（网络与解析白做一遍）。旧响应仍由 loadSeq 兜底。
-    let loadKey = LoadKey(tab: tab, page: page)
-    guard !inFlightLoads.contains(loadKey) else {
+    let semantics = semantics(tab)
+    let classifyId = tab == 2 ? self.classifyId : nil
+    let loadKey = LoadKey(tab: tab, page: page, sort: semantics.sort, classifyId: classifyId)
+    guard pageLoad?.key != loadKey else {
       list.endRefreshing()
       return
     }
-    inFlightLoads.insert(loadKey)
-    loadSeq += 1
+    cancelPageLoads()
     let seq = loadSeq
-    let semantics = semantics(tab)
     if page == 1, buckets[tab].isEmpty, tab == currentTab {
-      isLoading = true
       showState(.loading)
     }
-    Task { @MainActor in
+    let task = Task { @MainActor [weak self, forumName = self.forumName] in
       defer {
-        self.inFlightLoads.remove(loadKey)
-        if seq == self.loadSeq {
-          self.isLoading = false
+        if let self, seq == self.loadSeq {
+          self.pageLoad = nil
           self.isUserRefresh = false
           self.list.endRefreshing()
         }
       }
       do {
         let result = try await TiebaForumFeedAPI.page(
-          forumName: self.forumName,
+          forumName: forumName,
           page: page,
           sortType: semantics.sort,
           isGood: semantics.isGood,
-          classifyId: tab == 2 ? self.classifyId : nil
+          classifyId: classifyId
         )
-        guard seq == self.loadSeq else { return }
+        guard let self, !Task.isCancelled, tab == self.currentTab, seq == self.loadSeq else { return }
         self.apply(result, tab: tab, page: page, timeType: semantics.timeType)
       } catch {
-        guard seq == self.loadSeq else { return }
+        guard let self, !Task.isCancelled, tab == self.currentTab, seq == self.loadSeq else { return }
         if page == 1, self.buckets[tab].isEmpty {
           self.recordVisitIfNeeded()
           self.showState(.error(self.message(from: error)))
@@ -353,6 +363,18 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
           self.pill.showResult(success: false, text: "加载失败")
         }
       }
+    }
+    pageLoad = (loadKey, task)
+  }
+
+  private func cancelPageLoads() {
+    loadSeq += 1
+    pageLoad?.task.cancel()
+    pageLoad = nil
+    loadMoreTask?.cancel()
+    loadMoreTask = nil
+    if list.footerState == .loading {
+      list.footerState = hasMores[currentTab] ? .more : .none
     }
   }
 
@@ -397,39 +419,40 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func loadMore() {
-    guard !isLoading, !isLoadingMore, hasMores[currentTab], !buckets[currentTab].isEmpty else { return }
-    isLoadingMore = true
+    guard pageLoad == nil, loadMoreTask == nil, hasMores[currentTab], !buckets[currentTab].isEmpty else { return }
     list.footerState = .loading
     let tab = currentTab
     let next = pages[tab] + 1
     // 与 load() 共用同一条代际：翻页在途时若发生下拉刷新/换排序（loadSeq 自增），
     // 旧页响应必须整份作废 —— 否则会 append 进已重置的新列表，还会用旧值回写 pages/hasMores。
     let seq = loadSeq
-    Task { @MainActor in
+    let semantics = semantics(tab)
+    let classifyId = tab == 2 ? self.classifyId : nil
+    loadMoreTask = Task { @MainActor [weak self, forumName = self.forumName] in
       // [用户口径 2026-10-06] 正常态（.more）不显示「加载更多」药丸 —— 触底即自动加载就够了。
       // 只有**这次翻页失败**才把页脚置成 .retry（那颗药丸现在只在失败态出现），
       // 否则用户停在这一屏没有任何再试一次的入口。
       var didFail = false
       defer {
-        self.isLoadingMore = false
-        // 页脚是所有 tab 共享的：请求期间切了 tab 就别拿旧 tab 的结果覆写它
-        //（会把有更多内容的新 tab 置成"没有更多了"，只剩触底自动加载）。
-        if tab == self.currentTab, seq == self.loadSeq {
-          self.list.footerState = didFail ? .retry : (self.hasMores[tab] ? .more : .none)
+        if let self, seq == self.loadSeq {
+          self.loadMoreTask = nil
+          if !Task.isCancelled, tab == self.currentTab {
+            self.list.footerState = didFail ? .retry : (self.hasMores[tab] ? .more : .none)
+          }
         }
       }
       do {
-        let semantics = self.semantics(tab)
         let result = try await TiebaForumFeedAPI.page(
-          forumName: self.forumName,
+          forumName: forumName,
           page: next,
           sortType: semantics.sort,
           isGood: semantics.isGood,
-          classifyId: tab == 2 ? self.classifyId : nil
+          classifyId: classifyId
         )
-        guard tab == self.currentTab, seq == self.loadSeq else { return }
+        guard let self, !Task.isCancelled, tab == self.currentTab, seq == self.loadSeq else { return }
         self.apply(result, tab: tab, page: next, timeType: semantics.timeType)
       } catch {
+        guard let self, !Task.isCancelled, tab == self.currentTab, seq == self.loadSeq else { return }
         didFail = true
         self.pill.showResult(success: false, text: "加载失败")
       }
@@ -632,7 +655,12 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
 
   private func switchTab(_ tab: Int) {
     guard tab >= 0, tab <= 2, tab != currentTab else { return }
+    isUserRefresh = false
+    list.endRefreshing()
     currentTab = tab
+    if !buckets[tab].isEmpty {
+      cancelPageLoads()
+    }
     rowInputsVersion += 1
     list.headerSpec = headerSpec()
     publish(fresh: true)

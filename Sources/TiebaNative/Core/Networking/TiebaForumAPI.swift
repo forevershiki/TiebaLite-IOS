@@ -402,6 +402,7 @@ enum TiebaForumAPI {
     clientVersion: String = clientVersion,
     makeRequest: (Tieba_CommonRequest) -> R
   ) async throws -> Data {
+    try Task.checkCancellation()
     let snapshot = TiebaBackgroundSnapshot.shared
     guard let url = URL(string: "https://tiebac.baidu.com\(path)?cmd=\(cmd)") else {
       throw TiebaForumAPIError.invalidURL
@@ -426,14 +427,12 @@ enum TiebaForumAPI {
       "client_type": "2",
     ].merging(extraHeaders) { _, new in new }
     let protoData = try makeRequest(commonRequest(clientVersion: clientVersion)).serializedData()
-    // 只读通道的有限重试（本文件调用点全是读：frsPage/pbPage/个人主页/信息流/
-    // 吧详情/吧规/吧务/成员/黑名单）：切网瞬间、地铁里的一次抖动不再直接把页面
-    // 打成"加载失败"。写接口走 postForm + 签名，**绝不能**重试（非幂等）。
-    // 只重试"没到服务端"与"服务端 5xx"两类；4xx/业务错误立即上抛。
+    // 仅供只读接口使用。选定的传输错误和 HTTP 5xx 可重试，业务错误在解码时处理。
     var attempt = 0
     while true {
+      try Task.checkCancellation()
       do {
-        return try await TiebaNativeClient.shared.postProto(
+        let data = try await TiebaNativeClient.shared.postProto(
           urlString: url.absoluteString,
           headers: headers,
           formFields: formFields,
@@ -442,25 +441,31 @@ enum TiebaForumAPI {
           requestId: "native-forum-\(UUID().uuidString)",
           timeout: 15
         )
+        try Task.checkCancellation()
+        return data
       } catch {
+        try Task.checkCancellation()
         attempt += 1
         guard attempt <= 2, shouldRetryRead(error) else { throw error }
         // 300ms、900ms + 抖动：多页面同时重试不会叠成一个尖峰。
         let base = attempt == 1 ? 0.3 : 0.9
-        try? await Task.sleep(nanoseconds: UInt64((base + Double.random(in: 0...0.25)) * 1e9))
+        try await Task.sleep(nanoseconds: UInt64((base + Double.random(in: 0...0.25)) * 1e9))
       }
     }
   }
 
   /// 只读请求是否值得重试：传输层错误（未连上/超时/连接中断）与服务端 5xx。
   private static func shouldRetryRead(_ error: Error) -> Bool {
+    if let clientError = error as? TiebaClientError, case .httpStatus(let status) = clientError {
+      return (500..<600).contains(status)
+    }
     if let apiError = error as? TiebaForumAPIError, case .http(let status) = apiError {
-      return status >= 500
+      return (500..<600).contains(status)
     }
     if let urlError = error as? URLError {
       switch urlError.code {
       case .timedOut, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet,
-        .dnsLookupFailed, .cannotFindHost, .secureConnectionFailed:
+        .dnsLookupFailed, .cannotFindHost:
         return true
       default:
         return false

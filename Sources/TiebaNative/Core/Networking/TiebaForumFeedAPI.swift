@@ -65,6 +65,7 @@ enum TiebaForumFeedAPI {
     isGood: Bool,
     classifyId: String?
   ) async throws -> TiebaForumFeedPage {
+    try Task.checkCancellation()
     let scope = cacheScope(
       forumName: forumName,
       page: page,
@@ -78,7 +79,9 @@ enum TiebaForumFeedAPI {
          maxStale: TiebaPageCacheKind.forum.maxStale
        ),
        TiebaPageCache.isScopeCurrent(scope),
-       let cached = try? await decodePageData(entry.payload, page: page, forumName: forumName) {
+       let cached = try? await decodePageData(entry.payload, page: page, forumName: forumName),
+       TiebaPageCache.isScopeCurrent(scope) {
+      try Task.checkCancellation()
       if entry.isFresh() == false {
         scheduleRevalidate(
           scope: scope,
@@ -101,6 +104,7 @@ enum TiebaForumFeedAPI {
         classifyId: classifyId
       )
       let result = try await decodePageData(data, page: page, forumName: forumName)
+      try Task.checkCancellation()
       if TiebaPageCache.isScopeCurrent(scope) {
         TiebaPageCache.shared.storeInBackground(
           scope: scope,
@@ -110,15 +114,19 @@ enum TiebaForumFeedAPI {
       }
       return result
     } catch {
+      try Task.checkCancellation()
       if TiebaPageCache.isScopeCurrent(scope),
          TiebaPageCache.shouldFallbackToCache(error),
          let entry = await TiebaPageCache.shared.load(
            scope: scope,
            maxStale: TiebaPageCacheKind.forum.maxStale
          ),
-         let cached = try? await decodePageData(entry.payload, page: page, forumName: forumName) {
+         let cached = try? await decodePageData(entry.payload, page: page, forumName: forumName),
+         TiebaPageCache.isScopeCurrent(scope) {
+        try Task.checkCancellation()
         return cached
       }
+      try Task.checkCancellation()
       throw error
     }
   }

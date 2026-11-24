@@ -110,14 +110,14 @@ final class TiebaPageCache: @unchecked Sendable {
     if error is CancellationError { return false }
     if let error = error as? TiebaClientError {
       switch error {
-      case .httpStatus(let status): return status >= 500
+      case .httpStatus(let status): return (500..<600).contains(status)
       case .invalidResponse: return true
       case .cancelled, .invalidUrl, .invalidMultipart, .disallowedHost: return false
       }
     }
     if let error = error as? TiebaForumAPIError {
       switch error {
-      case .http(let status): return status >= 500
+      case .http(let status): return (500..<600).contains(status)
       case .invalidResponse: return true
       case .api, .invalidURL: return false
       }

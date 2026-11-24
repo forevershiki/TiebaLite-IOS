@@ -131,7 +131,7 @@ public enum TiebaRouteTable {
   ///
   /// 两条与 expo-router 对齐的规范化（否则老链接/深链会落 +not-found）：
   ///   - `/` 与空串 = tab 0 根屏（'index'）
-  ///   - 末段缺省 = index：`/settings` → `settings/index`、`/search` → `search/index`
+  ///   - 末段缺省可匹配字面 index：`/settings` → `settings/index`、`/search` → `search/index`
   public static func parse(path rawPath: String) -> TiebaRoute? {
     var path = rawPath
     var query: [String: String] = [:]
@@ -141,16 +141,19 @@ public enum TiebaRouteTable {
       for pair in q.split(separator: "&") {
         let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
         guard let k = kv.first, !k.isEmpty else { continue }
-        let v = kv.count > 1 ? String(kv[1]) : ""
-        query[String(k)] = v.removingPercentEncoding ?? v
+        query[String(k)] = kv.count > 1 ? String(kv[1]) : ""
       }
     }
     // 根路径 = 关注页（tab 0），不是"未命中"。
     if path.isEmpty || path == "/" { return .index }
-    for candidate in [path, path + "/index"] {
-      if let hit = match(path: candidate, query: query) { return hit }
-    }
-    return nil
+    if let hit = match(path: path, query: query) { return hit }
+    guard let hit = match(path: path + "/index", query: query), hit.name.hasSuffix("/index") else { return nil }
+    return hit
+  }
+
+  // SQLite 文本绑定以 NUL 结尾，名称中的 NUL 会让浏览记录和缓存键截断。
+  static func isValidForumName(_ name: String) -> Bool {
+    !name.isEmpty && !name.utf8.contains(0)
   }
 
   private static func match(path: String, query: [String: String]) -> TiebaRoute? {
@@ -165,9 +168,15 @@ public enum TiebaRouteTable {
         let value = input[i]
         switch seg {
         case .literal(let lit):
-          // 字面段比较忽略大小写与百分号编码差异（'/forum/%E6%9F%90%E5%90%A7'
-          // 与 '/forum/某吧' 是同一个吧）。
+          // 字面段比较忽略大小写与百分号编码差异。
           if lit.lowercased() != (value.removingPercentEncoding ?? value).lowercased() { ok = false }
+        case .param("name"):
+          // 吧路径的名称段必须可解码，避免把坏编码当作字面吧名。
+          if let name = value.removingPercentEncoding, isValidForumName(name) {
+            params["name"] = name
+          } else {
+            ok = false
+          }
         case .param(let key):
           params[key] = value.removingPercentEncoding ?? value
         }
@@ -190,7 +199,13 @@ public enum TiebaRouteTable {
     }
     guard let hit = best else { return nil }
     var merged = hit.params
-    for (k, v) in query { merged[k] = v }
+    for (key, encodedValue) in query {
+      let value = encodedValue.removingPercentEncoding
+      if key == "name", hit.params["name"] != nil {
+        guard let value, isValidForumName(value) else { return nil }
+      }
+      merged[key] = value ?? encodedValue
+    }
     return typedRoute(named: hit.entry.name, params: merged)
   }
 

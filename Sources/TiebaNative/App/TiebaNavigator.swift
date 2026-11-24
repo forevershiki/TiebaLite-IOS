@@ -300,8 +300,7 @@ public final class TiebaNavigator: NSObject, @unchecked Sendable {
 
   // MARK: - 指令
 
-  /// 路由入口（类型化）。深链先经 TiebaRouteTable.parse 产出同一个类型，再走这里；
-  /// 调用点与深链只有这一条构造/压栈路径。
+  /// 本地调用与外部深链共用同一个类型化构造/压栈入口。
   @discardableResult
   /// H16：原 mode（push/replace/root）里 replace 全仓零调用、root 不可达（notifications 是
   /// tab 根屏，navigate 在 tab 分流就 return），却为不可达路径留了一处无防御下标
@@ -559,10 +558,6 @@ public final class TiebaNavigator: NSObject, @unchecked Sendable {
 
   /// 深链统一入口（UIOpenURLContext / 通知 data.url 都走这里）。
   /// 返回值 = 是否消费掉了这个 URL。
-  ///
-  /// 内部形态与迁移前逐字相同：各分支先还原成旧 navigate(path:) 收到的那个
-  /// 字符串（含 query），再由 TiebaRouteTable.parse 产出类型化路由——深链只有
-  /// 这一条解析路径，且解析出的类型与本地跳转共用同一个构造入口。
   @discardableResult
   public func open(url: URL) -> Bool {
     // H17：旧实现三种口径混用（notifications 用未锚定子串正则、search/history 用 hasPrefix、
@@ -572,94 +567,84 @@ public final class TiebaNavigator: NSObject, @unchecked Sendable {
     guard let components = URLComponents(string: url.absoluteString) else { return false }
     let scheme = components.scheme?.lowercased() ?? ""
     let host = components.host?.lowercased() ?? ""
-    let path = components.path
-    // 段切分必须用**未解码**的 percentEncodedPath：components.path 已把 %2F 还原成真斜杠，
-    // 含斜杠的吧名会被切成多段（轻则 notFound，重则静默命中别的路由）。
     let encodedPath = components.percentEncodedPath
-    let query = { (name: String) -> String? in
-      components.queryItems?.first { $0.name == name }?.value
-    }
 
     // 自有 scheme：tiebalite://<host>/<path>（tblite:// 是同一套的短写）。
     if scheme == "tiebalite" || scheme == "tblite" {
       switch host {
       case "notifications":
         // tiebalite://notifications/2 → 初始分段交给 tab 根屏（走 tab 分流，不压栈）。
-        let digits = path.split(separator: "/").first.map(String.init) ?? ""
-        return navigateDeepLink(digits.isEmpty ? "notifications" : "notifications?initialTab=\(digits)")
+        let segment = encodedPath.split(separator: "/").first?.removingPercentEncoding
+        return navigate(.notifications(initialTab: segment.flatMap { Int($0) }))
       case "thread":
-        guard let tid = path.split(separator: "/").first.map(String.init), !tid.isEmpty, tid.allSatisfy({ $0.isNumber }) else {
-          break
-        }
-        return navigateDeepLink("thread/\(tid)")
+        guard let id = Self.firstThreadID(in: encodedPath[...]) else { return false }
+        return navigate(.thread(id: id))
       case "forum":
-        // 吧名可含斜杠转义与百分号编码：切段在 percentEncodedPath 上做（%2F 不会被当成
-        // 分隔符），再对**每段各解码一次**——整串解码会把字面量 %252F 二次解码。
-        let raw = encodedPath.hasPrefix("/") ? String(encodedPath.dropFirst()) : encodedPath
-        guard !raw.isEmpty else { break }
-        let name = raw.split(separator: "/", omittingEmptySubsequences: false)
-          .map { $0.removingPercentEncoding ?? String($0) }
-          .joined(separator: "/")
-        return navigateDeepLink("forum/\(name)")
+        // 路由表先区分真实的子页分隔符，再解码每个路径段。
+        guard encodedPath.contains(where: { $0 != "/" }) else { return false }
+        let path = "forum\(encodedPath)"
+        return navigate(TiebaRouteTable.parse(path: path) ?? .notFound(path: path))
       case "search":
         // 搜索：q 非空则直接出结果（快捷指令/调试直达），空 q 只开搜索页。
-        let q = query("q") ?? ""
-        return navigateDeepLink(q.isEmpty ? "search/index" : "search/index?q=\(TiebaRoutePath.segment(q))")
+        let keyword = components.queryItems?.first { $0.name == "q" }?.value ?? ""
+        return navigate(.search(keyword: keyword))
       case "history":
         // 浏览记录：tab=forum 时直接开吧历史分段。
-        return navigateDeepLink(query("tab") == "forum" ? "history?tab=forum" : "history")
+        let tab = components.queryItems?.first { $0.name == "tab" }?.value
+        return navigate(.history(tab: tab == "forum" ? "forum" : nil))
       default:
-        break
+        return false
       }
-      return false
     }
 
-    // 百度系 URL（com.baidu.tieba:// / *.tieba.baidu.com）：同样只认结构化字段。
-    if let tid = Self.extractThreadId(scheme: scheme, host: host, path: path, query: query) {
-      return navigateDeepLink("thread/\(tid)")
+    // 在编码路径上切分。解码后的斜杠只能是段内字符。
+    let path = encodedPath.split(separator: "/", omittingEmptySubsequences: false)
+      .map { $0.removingPercentEncoding }
+    let queryItems = components.percentEncodedQueryItems
+    let encodedQuery = { (name: String) -> String? in
+      queryItems?.first { $0.name.removingPercentEncoding == name }?.value
     }
-    if let name = Self.extractForumName(scheme: scheme, host: host, path: path, query: query) {
-      return navigateDeepLink("forum/\(name)")
+    let encodedName: String?
+    if scheme == "com.baidu.tieba" {
+      guard host == "unidispatch" || path.dropFirst().contains("unidispatch") else { return false }
+      if let tid = encodedQuery("tid") {
+        guard let id = tid.removingPercentEncoding, Self.isThreadID(id) else { return false }
+        return navigate(.thread(id: id))
+      }
+      guard path.count > 1, path.last.flatMap({ $0 }) == "frs" else { return false }
+      encodedName = encodedQuery("kw")
+    } else {
+      guard scheme == "http" || scheme == "https", Self.isTiebaDomain(host) else { return false }
+      if let id = Self.webThreadID(in: encodedPath) {
+        return navigate(.thread(id: id))
+      }
+      guard path == ["", "f"] || path == ["", "mo", "q", "m"] else { return false }
+      if let kz = encodedQuery("kz") {
+        guard let id = kz.removingPercentEncoding, Self.isThreadID(id) else { return false }
+        return navigate(.thread(id: id))
+      }
+      // 有值的 kw 优先，解码失败时也保留其优先级。
+      encodedName = encodedQuery("kw") ?? encodedQuery("word")
     }
-    return false
+    guard let name = encodedName?.removingPercentEncoding, TiebaRouteTable.isValidForumName(name) else { return false }
+    return navigate(.forum(name: name))
   }
 
-  /// 深链字符串 → 类型化路由 → 同一条构造路径。解析不出就落「找不到页面」
-  ///（旧行为：打错的深链不静默吞掉，也不空白）。
-  @discardableResult
-  private func navigateDeepLink(_ path: String) -> Bool {
-    navigate(TiebaRouteTable.parse(path: path) ?? .notFound(path: path))
-    return true
+  /// 网页帖链允许帖子 ID 后还有其他路径段或查询字段。
+  static func webThreadID(in encodedPath: String) -> String? {
+    guard encodedPath.hasPrefix("/") else { return nil }
+    let parts = encodedPath.dropFirst().split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+    guard parts.count == 2, parts[0].removingPercentEncoding == "p" else { return nil }
+    return firstThreadID(in: parts[1])
   }
 
-  /// src/utils/index.ts 的 extractThreadId 原生版（H17：入参是 URLComponents 已解好的结构化字段，
-  /// 不再拿 absoluteString 做未锚定子串匹配——理由见 open(url:) 的 H17 注释）。
-  static func extractThreadId(scheme: String, host: String, path: String, query: (String) -> String?) -> String? {
-    if scheme == "com.baidu.tieba", host == "unidispatch" || path.contains("/unidispatch") {
-      if let tid = query("tid") { return tid }
-    }
-    if Self.isTiebaDomain(host) {
-      if path.hasPrefix("/p/") {
-        return String(path.dropFirst(3)).split(separator: "/").first.map(String.init)
-      }
-      if path == "/f" || path == "/mo/q/m" {
-        if let kz = query("kz") { return kz }
-      }
-    }
-    return nil
+  private static func firstThreadID(in encodedPath: Substring) -> String? {
+    guard let id = encodedPath.split(separator: "/").first?.removingPercentEncoding, isThreadID(id) else { return nil }
+    return id
   }
 
-  /// 吧名提取（同样是结构化判定）。吧名可含斜杠转义与百分号编码，由调用方按 path 解出。
-  static func extractForumName(scheme: String, host: String, path: String, query: (String) -> String?) -> String? {
-    if scheme == "com.baidu.tieba", (host == "unidispatch" || path.contains("/unidispatch")), path.hasSuffix("/frs") {
-      return query("kw")
-    }
-    if Self.isTiebaDomain(host) {
-      if path == "/f" || path == "/mo/q/m" {
-        return query("kw") ?? query("word")
-      }
-    }
-    return nil
+  private static func isThreadID(_ id: String) -> Bool {
+    !id.isEmpty && id.utf8.allSatisfy { (48...57).contains($0) }
   }
 
   private static func isTiebaDomain(_ host: String) -> Bool {

@@ -39,16 +39,16 @@ enum TiebaLinkOpener {
       let host = components.host?.lowercased(),
       host == "tieba.baidu.com" || host == "www.tieba.baidu.com"
     else { return false }
-    // /p/<tid>：其后可能还有路径与查询（?pn=2 等），取紧邻的数字段。
-    if components.path.hasPrefix("/p/") {
-      let threadId = components.path.dropFirst(3).prefix { $0.isNumber }
-      if !threadId.isEmpty {
-        return TiebaNavigator.shared.navigate(.thread(id: String(threadId)))
-      }
+    if let scheme = components.scheme?.lowercased(), scheme != "http", scheme != "https" {
+      return false
+    }
+    if let id = TiebaNavigator.webThreadID(in: components.percentEncodedPath) {
+      return TiebaNavigator.shared.navigate(.thread(id: id))
     }
     // /f?kw=<吧名>
     if components.path == "/f",
-      let kw = components.queryItems?.first(where: { $0.name == "kw" })?.value, !kw.isEmpty
+      let kw = components.queryItems?.first(where: { $0.name == "kw" })?.value,
+      TiebaRouteTable.isValidForumName(kw)
     {
       // 类型化参数直接带吧名：路径段编码（原 .urlPathAllowed）已无处需要。
       return TiebaNavigator.shared.navigate(.forum(name: kw))
