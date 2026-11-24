@@ -398,7 +398,7 @@ private final class TiebaForumProfileCell: UITableViewCell {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   func configure(name: String, slogan: String, avatar: String, isLike: Bool) {
-    nameLabel.text = "\(name)吧"
+    nameLabel.text = TiebaForumFormat.displayName(name, empty: "吧")
     sloganLabel.text = slogan
     sloganLabel.isHidden = slogan.isEmpty
     chipView.isHidden = !isLike

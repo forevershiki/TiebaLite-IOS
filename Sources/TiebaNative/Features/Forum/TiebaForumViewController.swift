@@ -67,9 +67,7 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   private var isLoggedIn: Bool { !TiebaBackgroundSnapshot.shared.bduss.isEmpty }
 
   init(name: String, forumId: String) {
-    // 吧名规范形 = 不带"吧"后缀：标题/链接/浏览记录都自己追加"吧"，路由参数若带
-    // （深链、分享链人工写成"XX吧"）就会叠成"XX吧吧"（用户实证）。
-    self.forumName = name.hasSuffix("吧") ? String(name.dropLast()) : name
+    self.forumName = name
     self.routeForumId = forumId
     super.init(nibName: nil, bundle: nil)
   }
@@ -291,7 +289,8 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func shareForum() {
-    let text = "\(forumName)吧\n\(TiebaForumLink.forum(forumName))"
+    let title = TiebaForumFormat.displayName(forumName, empty: "吧")
+    let text = "\(title)\n\(TiebaForumLink.forum(forumName))"
     TiebaShareSheet.present(text: text, from: presenterViewController)
   }
 
@@ -546,7 +545,7 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
     ]
     if let card {
       var cardSpec: [String: Any] = [
-        "name": card.name.isEmpty ? forumName : card.name,
+        "name": card.name,
         "avatar": card.avatar,
         "memberCount": card.memberCount,
         "threadCount": card.threadCount,
@@ -1019,7 +1018,7 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
       initialIndex: 0,
       transition: TiebaPhotoTransition(
         frame: TiebaPhotoTransition.measuredFrame(in: payload),
-        contextTitle: "\(forumName)吧"
+        contextTitle: TiebaForumFormat.displayName(forumName, empty: "吧")
       )
     )
   }
@@ -1285,9 +1284,10 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
     let forumId = card?.forumId ?? routeForumId
     let avatar = card?.avatar ?? ""
     let name = forumName
+    let title = TiebaForumFormat.displayName(name)
     let values: [[String: Any]] = [
       ["v": "forum"], ["v": ""], ["v": forumId], ["v": name],
-      ["v": avatar], ["v": "\(name)吧"], ["v": ""], ["v": ""],
+      ["v": avatar], ["v": title], ["v": ""], ["v": ""],
       ["v": Int(Date().timeIntervalSince1970 * 1000)],
     ]
     Task.detached(priority: .utility) {

@@ -62,6 +62,12 @@ final class TiebaForumAvatarView: UIView {
 }
 
 enum TiebaForumFormat {
+  /// 吧名标题的展示格式。请求、缓存和路由应继续使用原始吧名。
+  static func displayName(_ name: String, empty: String = "") -> String {
+    guard !name.isEmpty else { return empty }
+    return name.hasSuffix("吧") ? name : name + "吧"
+  }
+
   /// 与 utils/index.ts formatCount 同规则（亿 / 万 / k，一位小数 half-up）。
   static func count(_ value: Double) -> String {
     guard value.isFinite else { return "" }

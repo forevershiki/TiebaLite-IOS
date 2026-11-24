@@ -131,12 +131,15 @@ final class TiebaForumRulesViewController: UIViewController, TiebaNativeScreen {
   // MARK: - 内容
 
   private func buildSections(_ rules: TiebaForumRules) {
-    let title = rules.title.isEmpty ? "\(name.isEmpty ? "本" : name)吧吧规" : rules.title
+    let forumTitle = TiebaForumFormat.displayName(name, empty: "本吧")
+    let title = rules.title.isEmpty ? "\(forumTitle)吧规" : rules.title
     var head: [Row] = [.title(title)]
     if !rules.authorName.isEmpty || !rules.publishTime.isEmpty {
       head.append(
         .author(
-          name: rules.authorName.isEmpty ? "\(name)吧吧务团队" : rules.authorName,
+          name: rules.authorName.isEmpty
+            ? "\(TiebaForumFormat.displayName(name, empty: "吧"))吧务团队"
+            : rules.authorName,
           portrait: rules.authorPortrait,
           time: rules.publishTime
         )
@@ -157,7 +160,7 @@ final class TiebaForumRulesViewController: UIViewController, TiebaNativeScreen {
       Section(
         title: nil,
         number: 0,
-        rows: [.footer("以上内容来自\(name.isEmpty ? "本" : name)吧吧务团队发布的管理规范")]
+        rows: [.footer("以上内容来自\(forumTitle)吧务团队发布的管理规范")]
       )
     )
     sections = built
@@ -192,10 +195,11 @@ final class TiebaForumRulesViewController: UIViewController, TiebaNativeScreen {
       stateView.isHidden = false
       table.isHidden = true
     case .empty:
+      let forumTitle = TiebaForumFormat.displayName(name, empty: "这个吧")
       stateView.showEmpty(
         image: "doc.text",
         text: "暂无吧规",
-        secondaryText: "\(name.isEmpty ? "这个" : name)吧还没有设置吧规"
+        secondaryText: "\(forumTitle)还没有设置吧规"
       )
       table.isHidden = true
     case .error(let message):

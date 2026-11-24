@@ -675,7 +675,8 @@ final class MemberCardCell: UICollectionViewCell {
     badge.textColor = tint
     badge.backgroundColor = tint.withAlphaComponent(0.15)
     badge.text = "Lv.\(info.userLevel)"
-    titleLabel.text = "我在\(forumName)吧"
+    let title = TiebaForumFormat.displayName(forumName, empty: "吧")
+    titleLabel.text = "我在\(title)"
     var subtitle = info.levelName.isEmpty ? " " : info.levelName
     if info.levelupScore > 0 {
       subtitle += "  ·  \(info.curScore)/\(info.levelupScore)"

@@ -481,12 +481,14 @@ final class TiebaForumHeaderView: UIView, TiebaKindListHeaderView {
     card.layer.shadowOpacity = darkAppearance ? 0.14 : 0.095
     card.layer.shadowRadius = 20
     card.layer.shadowOffset = CGSize(width: 0, height: 8)
-    let forumName = TiebaSimpleRowParser.nonEmpty(cardSpec["name"])
-      ?? TiebaSimpleRowParser.string(spec["forumName"])
-      ?? ""
-    nameLabel.text = forumName.isEmpty ? "" : "\(forumName)吧"
+    let cardName = TiebaRowDict.visible(cardSpec["name"] as? String)
+    let routeName = TiebaSimpleRowParser.string(spec["forumName"]) ?? ""
+    let forumName = cardName.isEmpty ? routeName : cardName
+    let displayName = TiebaForumFormat.displayName(forumName)
+    let accessibilityName = displayName.isEmpty ? "吧" : displayName
+    nameLabel.text = displayName
     nameLabel.textColor = palette.base.text
-    avatar.accessibilityLabel = "查看\(forumName)吧头像"
+    avatar.accessibilityLabel = "查看\(accessibilityName)头像"
     // 分段 = 透明排版轨道 + 轻 selected tint；不再铺一块灰色大胶囊。
     // Reduce Motion 下位移时长归零。
     segmentSurface.backgroundColor = .clear
@@ -527,13 +529,13 @@ final class TiebaForumHeaderView: UIView, TiebaKindListHeaderView {
     followConfig?.baseBackgroundColor = palette.base.primary
     followConfig?.baseForegroundColor = .systemBackground
     followButton.configuration = followConfig
-    followButton.accessibilityLabel = "关注\(forumName)吧"
+    followButton.accessibilityLabel = "关注\(accessibilityName)"
     var followedConfig = followedChip.configuration
     followedConfig?.title = "已关注"
     followedConfig?.baseBackgroundColor = palette.base.primary.withAlphaComponent(0.12)
     followedConfig?.baseForegroundColor = TiebaAccessibleColors.metadata
     followedChip.configuration = followedConfig
-    followedChip.accessibilityLabel = "取消关注\(forumName)吧"
+    followedChip.accessibilityLabel = "取消关注\(accessibilityName)"
     var signConfig = signButton.configuration
     signConfig?.title = "签到"
     // 关注是唯一主操作；签到用中性次级底，不再叠一块蓝色 tint。

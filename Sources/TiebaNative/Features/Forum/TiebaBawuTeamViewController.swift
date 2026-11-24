@@ -124,16 +124,17 @@ final class TiebaBawuTeamViewController: UIViewController {
     var items: [TiebaBawuTeam.Member?] = []
 
     let total = team.totalNum > 0 ? team.totalNum : team.memberCount
+    let title = "\(TiebaForumFormat.displayName(name, empty: "吧"))管理团队"
     rows.append([
       "variant": "summary",
-      "a11y": "\(name)吧管理团队",
+      "a11y": title,
       "icon": "shield.lefthalf.filled",
       "iconSize": 20,
       "iconColor": color("primary"),
       "iconBg": color("primarySoft"),
       "iconBox": 40,
       "iconBoxRadius": 12,
-      "title": "\(name)吧管理团队",
+      "title": title,
       "titleSize": 16,
       "titleWeight": 600,
       "titleLineHeight": 21,
