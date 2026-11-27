@@ -361,7 +361,7 @@ public enum TiebaViewModelMapper {
     }
     #if DEBUG
     if TiebaReplyRoutingDiagnostics.enabled {
-      out[TiebaReplyRoutingDiagnostics.presenceKey] = TiebaReplyRoutingDiagnostics.rawPresence(rd)
+      out[TiebaReplyRoutingDiagnostics.presenceKey] = TiebaReplyRoutingDiagnostics.rawFields(rd, forum: dict(forum))
     }
     #endif
     return out
@@ -437,7 +437,13 @@ public enum TiebaViewModelMapper {
       if let author = coalesce(tr["author"], cd?["author"]) {
         merged["author"] = author
       }
-      let thread = mapProtoThread(merged, forum: forum)
+      let mapped = mapProtoThread(merged, forum: forum)
+      #if DEBUG
+      // ConcernData.postData is decoded, but its ID is not yet a proven locator.
+      let thread = TiebaReplyRoutingDiagnostics.addingConcernPost(dict(cd?["postData"] ?? cd?["post_data"]), to: mapped)
+      #else
+      let thread = mapped
+      #endif
       let type = truthy(thread["isVideo"]) ? "video_thread" : "thread"
       items.append(["type": type, "threadInfo": thread])
     }

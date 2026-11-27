@@ -28,17 +28,25 @@ def check_sources():
         "originThreadInfo": 141, "isShareThread": 143, "forumId": 27,
     }
     assert thread["postId"]["protoName"] == "post_id"
+    assert thread["originThreadInfo"]["type"] == "OriginThreadInfo"
+    assert {"replyInfo", "threadInfo"}.isdisjoint(thread)
     assert [(key, origin[key]["id"], origin[key]["type"]) for key in ("tid", "fid", "pid")] == [
         ("tid", 5, "string"), ("fid", 7, "int64"), ("pid", 25, "int64"),
     ]
     generated = read("Proto/Generated/OriginThreadInfo.pb.swift")
     assert "var tid: String" in generated and "var pid: Int64" in generated
     assert "fieldNumber: 25" in generated
+    concern = read("Proto/Generated/UserLike_UserLike.pb.swift")
+    assert "public var threadInfo: [Tieba_UserLike_ConcernData]" in concern
+    assert "case 2: try { try decoder.decodeSingularMessageField(value: &self._postData) }()" in concern
     print("PASS: descriptor, normalized aliases and generated nested ID fields")
 
     resolver = read("Core/Routing/TiebaThreadCardTarget.swift")
     assert "allowLegacyTopicID: Bool = false" in resolver
     assert "originPID == identifiableReply" in resolver and "if isShare(row) { return quoted(row) }" in resolver
+    assert "guard topicID != firstPostID" in resolver
+    assert "if origin.threadId != originPID, origin.threadId != firstPostID" in resolver
+    assert "forumId: conflictingReplyForum ? nil" in resolver
     assert "row[\"title\"]" not in resolver
     mapper = read("Core/Proto/TiebaViewModelMapper.swift")
     assert '"pid": firstPositiveID(od["pid"])' in mapper and 'out["routingForumId"] = routingForumID' in mapper
@@ -61,9 +69,15 @@ def check_sources():
     assert "thread.removeValue(forKey: TiebaReplyRoutingDiagnostics.presenceKey)" in read(
         "Core/Networking/TiebaFeedAPI.swift"
     )
-    assert "TiebaReplyRoutingDiagnostics.response(networkRequest, code: response.error.errorCode)" in read(
-        "Core/Networking/TiebaThreadAPI.swift"
-    )
+    api = read("Core/Networking/TiebaThreadAPI.swift")
+    assert "TiebaReplyRoutingDiagnostics.pageAttempt?.request(parameters)" in api
+    assert "attempt?.response(networkRequest, code: response.error.errorCode)" in api
+    view = read("Features/Thread/TiebaThreadViewController.swift")
+    assert "TiebaReplyRoutingDiagnostics.navigationTap" in view
+    assert "TiebaReplyRoutingDiagnostics.$pageAttempt.withValue(attempt)" in view
+    settings = read("Features/Settings/TiebaMoreSettingsViewController.swift")
+    assert 'id: "replyRoutingDiagnostics", kind: .toggle' in settings
+    assert "TiebaClipboard.setString(report)" in settings
     print("PASS: opt-in Debug diagnostics and snapshot exclusion")
 
 
@@ -81,7 +95,11 @@ def main():
     fixtures = (HERE / "DynamicReplyRoutingTests.swift").read_text(encoding="utf-8")
     shared["run_swift"](
         shared["project_sources"](), fixtures=support + "\n" + fixtures,
-        extra_sources=("Core/Proto/TiebaSwiftProtoCodec.swift", "Core/Routing/TiebaReplyRoutingDiagnostics.swift"),
+        extra_sources=(
+            "Core/Proto/TiebaSwiftProtoCodec.swift",
+            "Core/Routing/TiebaReplyRoutingDiagnostics.swift",
+            "Core/TiebaMutex.swift",
+        ),
         test_flags=("-DDEBUG",), test_args=(SCHEMA,),
     )
 

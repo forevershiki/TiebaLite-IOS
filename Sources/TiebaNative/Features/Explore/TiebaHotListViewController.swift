@@ -325,12 +325,22 @@ final class TiebaHotListViewController: UIViewController, TiebaTabReselectable {
 
   private func openThread(_ index: Int) {
     guard threads.indices.contains(index) else { return }
-    guard let target = TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true) else {
+    let target = TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true)
+    #if DEBUG
+    let tap = TiebaReplyRoutingDiagnostics.card(threads[index].row, target: target, source: .hot)
+    #endif
+    guard let target else {
       pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
       return
     }
     TiebaSceneHaptics.fire("press")
+    #if DEBUG
+    TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+      _ = TiebaNavigator.shared.navigate(target.route())
+    }
+    #else
     TiebaNavigator.shared.navigate(target.route())
+    #endif
   }
 
   private func openForum(_ index: Int) {

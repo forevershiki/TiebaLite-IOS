@@ -377,12 +377,7 @@ final class TiebaTopicViewController: UIViewController, TiebaNativeScreen {
       openThread(index)
     case "quote":
       // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quote = TiebaThreadCardTarget.quoted(threads[index]) {
-        TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(quote.route())
-      } else {
-        openThread(index)
-      }
+      openThread(index, reference: true)
     default:
       openThread(index)
     }
@@ -404,14 +399,25 @@ final class TiebaTopicViewController: UIViewController, TiebaNativeScreen {
 
   // MARK: - 动作
 
-  private func openThread(_ index: Int) {
+  private func openThread(_ index: Int, reference: Bool = false) {
     guard threads.indices.contains(index) else { return }
-    guard let target = TiebaThreadCardTarget.card(threads[index]) else {
+    let quote = reference ? TiebaThreadCardTarget.quoted(threads[index]) : nil
+    let target = quote ?? TiebaThreadCardTarget.card(threads[index])
+    #if DEBUG
+    let tap = TiebaReplyRoutingDiagnostics.card(threads[index], target: target, source: .topic)
+    #endif
+    guard let target else {
       pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
       return
     }
     TiebaSceneHaptics.fire("press")
+    #if DEBUG
+    TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+      _ = TiebaNavigator.shared.navigate(target.route())
+    }
+    #else
     TiebaNavigator.shared.navigate(target.route())
+    #endif
   }
 
   private func shareThread(_ index: Int) {

@@ -556,21 +556,27 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
       }
     case "quote":
       // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quote = TiebaThreadCardTarget.quoted(row) {
-        TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(quote.route())
-      } else {
-        openThread(row)
-      }
+      openThread(row, reference: true)
     default:
       openThread(row)
     }
   }
 
-  private func openThread(_ row: [String: Any]) {
-    guard let target = TiebaThreadCardTarget.card(row) else { return }
+  private func openThread(_ row: [String: Any], reference: Bool = false) {
+    let quote = reference ? TiebaThreadCardTarget.quoted(row) : nil
+    let target = quote ?? TiebaThreadCardTarget.card(row)
+    #if DEBUG
+    let tap = TiebaReplyRoutingDiagnostics.card(row, target: target, source: .profile)
+    #endif
+    guard let target else { return }
     TiebaSceneHaptics.fire("press")
+    #if DEBUG
+    TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+      _ = TiebaNavigator.shared.navigate(target.route())
+    }
+    #else
     TiebaNavigator.shared.navigate(target.route())
+    #endif
   }
 
   private func openForum(_ name: String) {

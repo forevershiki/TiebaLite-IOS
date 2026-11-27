@@ -306,7 +306,7 @@ enum TiebaThreadAPI {
       if let fid = parameters.forumID { request.forumID = fid }
       request.pn = parameters.pageNumber
       #if DEBUG
-      TiebaReplyRoutingDiagnostics.request(parameters)
+      TiebaReplyRoutingDiagnostics.pageAttempt?.request(parameters)
       #endif
       // r = 排序档位（热门 2 / 正序 0 / 倒序 1），服务端自己在 pb_sort_info 里列的
       // 就是这三档（实测：热门档回的是按热度重排、不带楼层的列表）。
@@ -337,6 +337,9 @@ enum TiebaThreadAPI {
     networkRequest: TiebaThreadPageRequest? = nil
   ) async throws -> TiebaThreadPage {
     let started = DispatchTime.now().uptimeNanoseconds
+    #if DEBUG
+    let attempt = networkRequest == nil ? nil : TiebaReplyRoutingDiagnostics.pageAttempt
+    #endif
     let result = try await Task.detached(priority: .userInitiated) {
       let response: Tieba_PbPage_PbPageResponse
       do {
@@ -348,7 +351,7 @@ enum TiebaThreadAPI {
         throw TiebaThreadPageError.invalidProtobuf
       }
       #if DEBUG
-      if let networkRequest { TiebaReplyRoutingDiagnostics.response(networkRequest, code: response.error.errorCode) }
+      if let networkRequest { attempt?.response(networkRequest, code: response.error.errorCode) }
       #endif
       if response.hasError, response.error.errorCode != 0 {
         throw TiebaThreadPageError.business(Int(response.error.errorCode), response.error.errorMsg)

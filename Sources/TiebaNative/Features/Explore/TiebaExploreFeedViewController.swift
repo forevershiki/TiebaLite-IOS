@@ -639,14 +639,21 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   private func openThread(_ thread: [String: Any], reference: Bool = false) {
     let target = reference ? TiebaThreadCardTarget.quoted(thread) : TiebaThreadCardTarget.card(thread)
     #if DEBUG
-    TiebaReplyRoutingDiagnostics.card(thread, target: target)
+    let source: TiebaReplyRoutingDiagnostics.Source = segment == .personalized ? .personalized : .concern
+    let tap = TiebaReplyRoutingDiagnostics.card(thread, target: target, source: source)
     #endif
     guard let target else {
       pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
       return
     }
     TiebaSceneHaptics.fire("press")
+    #if DEBUG
+    TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+      _ = TiebaNavigator.shared.navigate(target.route())
+    }
+    #else
     TiebaNavigator.shared.navigate(target.route())
+    #endif
   }
 
   private func shareThread(_ thread: [String: Any]) {

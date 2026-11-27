@@ -29,18 +29,25 @@ struct TiebaThreadCardTarget {
     let nested = TiebaViewModelMapper.originThreadInfo(row)
     let originPID = TiebaViewModelMapper.firstPositiveID(nested?["pid"])
     // A nested tid/pid pair can recover the topic when it identifies the
-    // current reply. An unrelated quoted floor must never inherit its anchor.
+    // current reply. Neither that reply's PID nor the known first-floor PID is a KZ.
     let identifiableReply = replyID.isEmpty && cardID != firstPostID ? cardID : replyID
-    if let origin, !originPID.isEmpty, originPID == identifiableReply, origin.threadId != originPID {
-      guard topicID.isEmpty || topicID == originPID || topicID == origin.threadId else { return nil }
-      return target(
-        kind: .reply, id: origin.threadId, postId: originPID,
-        row: topicID == origin.threadId ? row : (nested ?? [:]), matchingOrigin: origin
-      )
+    if let origin, !originPID.isEmpty, originPID == identifiableReply {
+      if origin.threadId != originPID, origin.threadId != firstPostID {
+        guard topicID.isEmpty || topicID == originPID || topicID == firstPostID || topicID == origin.threadId else {
+          return nil
+        }
+        return target(
+          kind: .reply, id: origin.threadId, postId: originPID,
+          row: topicID == origin.threadId ? row : (nested ?? [:]), matchingOrigin: origin
+        )
+      }
+      // Only an independently identified reply can continue with the top-level KZ.
+      guard !replyID.isEmpty else { return nil }
     }
 
     if !topicID.isEmpty, topicID != replyID {
       if !replyID.isEmpty {
+        guard topicID != firstPostID else { return nil }
         return target(kind: .reply, id: topicID, postId: replyID, row: row, matchingOrigin: origin)
       }
       if nested != nil, origin?.threadId != topicID, postID.isEmpty, topicID == cardID {
@@ -98,13 +105,17 @@ struct TiebaThreadCardTarget {
     let forum = TiebaViewModelMapper.forumIdentity(row)
     let origin = matchingOrigin.flatMap { $0.threadId == id ? $0 : nil }
     let rowForumID = row["routingForumId"] as? String ?? TiebaViewModelMapper.routingForumID(row)
-    // The matching origin binds its FID directly to this topic. Conflicting
-    // outer metadata cannot supply a name to that different forum.
+    // Use an origin bound to this KZ to fill a missing FID. For reply routes,
+    // conflicting valid FIDs for the same KZ are inconclusive.
     let useRowName = origin?.forumId == nil || origin?.forumId == forum.id || forum.id.isEmpty
     let nameMatches = origin?.forumName == nil || forum.name.isEmpty || origin?.forumName == forum.name
+    let conflictingReplyForum = kind == .reply && !rowForumID.isEmpty
+      && origin?.forumId.map { $0 != rowForumID } == true
     return Self(
       kind: kind, threadId: id, postId: postId,
-      forumId: origin?.forumId ?? (nameMatches && !rowForumID.isEmpty ? rowForumID : nil),
+      forumId: conflictingReplyForum ? nil : (
+        origin?.forumId ?? (nameMatches && !rowForumID.isEmpty ? rowForumID : nil)
+      ),
       forumName: origin?.forumName ?? (useRowName && !forum.name.isEmpty ? forum.name : nil)
     )
   }

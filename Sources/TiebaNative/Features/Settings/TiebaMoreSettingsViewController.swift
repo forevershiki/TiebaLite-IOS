@@ -64,7 +64,7 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
     let autoClean = TiebaPreferences.number("cacheAutoCleanDays", default: 0)
     let maxSize = TiebaPreferences.number("cacheMaxSizeMb", default: 400)
 
-    return [
+    let sections = [
       TiebaFormSection(
         title: "实验性功能",
         footer: "启用后可以在贴吧、帖子和楼中楼打开原生发言编辑器。",
@@ -148,11 +148,47 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
         ]
       ),
     ]
+    #if DEBUG
+    return sections + [
+      TiebaFormSection(
+        title: "调试",
+        footer: "开启后刷新动态，再点击故障卡片。诊断仅保留在本次运行的内存中。",
+        rows: [
+          TiebaFormRow(
+            id: "replyRoutingDiagnostics", kind: .toggle, title: "回复路由诊断",
+            value: TiebaReplyRoutingDiagnostics.enabled ? "1" : "0"
+          ),
+          TiebaFormRow(
+            id: "copyReplyRoutingFailure", kind: .button, title: "复制最近一次失败诊断",
+            icon: "doc.on.doc"
+          ),
+        ]
+      )
+    ]
+    #else
+    return sections
+    #endif
   }
 
   // MARK: - 动作
 
   override func handle(_ event: TiebaFormEvent) {
+    #if DEBUG
+    if case .toggle("replyRoutingDiagnostics", let enabled) = event {
+      TiebaReplyRoutingDiagnostics.enabled = enabled
+      form.setValue(id: "replyRoutingDiagnostics", value: enabled ? "1" : "0")
+      return
+    }
+    if case .press("copyReplyRoutingFailure") = event {
+      guard let report = TiebaReplyRoutingDiagnostics.latestFailure else {
+        TiebaToast.show("本次运行没有回复路由失败记录", success: false)
+        return
+      }
+      TiebaClipboard.setString(report)
+      TiebaToast.show("已复制失败诊断", success: true)
+      return
+    }
+    #endif
     switch event {
     case .toggle(let id, let value) where id == TiebaComposer.preference:
       if value {

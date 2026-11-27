@@ -31,6 +31,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
 
   private let floatingBar = TiebaThreadFloatingBar()
   #if DEBUG
+  private let replyRoutingTap = TiebaReplyRoutingDiagnostics.navigationTap
   /// 无头 UI 冒烟：自动打开第一条有楼中楼的回复，供楼中楼页截图验收。
   private var didAutoOpenSubposts = false
   #endif
@@ -259,8 +260,8 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         self.isUserRefresh = false
         self.list.endRefreshing()
       }
-      do {
-        let page = try await TiebaThreadAPI.page(
+      let load = { @MainActor in
+        try await TiebaThreadAPI.page(
           threadId: self.threadId,
           page: 1,
           postId: self.postId,
@@ -271,6 +272,18 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
           // 只有下拉刷新才绕过缓存。
           preferCache: !self.isUserRefresh
         )
+      }
+      #if DEBUG
+      let attempt = self.replyRoutingTap.map(TiebaReplyRoutingDiagnostics.PageAttempt.init)
+      #endif
+      do {
+        #if DEBUG
+        let page = try await TiebaReplyRoutingDiagnostics.$pageAttempt.withValue(attempt) {
+          try await load()
+        }
+        #else
+        let page = try await load()
+        #endif
         guard generation == self.loadGeneration else { return }
         let focus = self.postId.flatMap { id in page.posts.contains { $0.id == id } ? id : nil }
         self.pendingPostFocus = focus
@@ -280,6 +293,9 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         }
       } catch {
         guard generation == self.loadGeneration else { return }
+        #if DEBUG
+        if !(error is CancellationError), !Task.isCancelled { attempt?.saveFailure() }
+        #endif
         if self.posts.isEmpty {
           self.showState(.error(error.localizedDescription))
         } else {
