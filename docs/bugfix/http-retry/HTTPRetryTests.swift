@@ -230,10 +230,8 @@ enum HTTPRetryTests {
     let beforeSend = TransportFixture([])
     let preCancelled = Task {
       withUnsafeCurrentTask { $0?.cancel() }
-      return try await Fixtures.$transport.withValue(beforeSend) {
-        try await TiebaForumAPI.protoPost(path: "/c/f/frs/page", cmd: "test") { _ -> Tieba_CommonRequest in
-          preconditionFailure("Cancelled request must not serialize Protobuf")
-        }
+      return try await read(beforeSend) { _ in
+        preconditionFailure("Cancelled request must not serialize Protobuf")
       }
     }
     try await expectError("Cancelled before send") { _ = try await preCancelled.value }
@@ -278,9 +276,13 @@ enum HTTPRetryTests {
     print("PASS: offline HTTP retry, cancellation, cache fallback and write isolation")
   }
 
-  private static func read(_ transport: TransportFixture) async throws -> Data {
+  // Request construction can leave the test runner's MainActor.
+  private nonisolated static func read(
+    _ transport: TransportFixture,
+    makeRequest: @Sendable (Tieba_CommonRequest) -> Tieba_CommonRequest = { $0 }
+  ) async throws -> Data {
     try await Fixtures.$transport.withValue(transport) {
-      try await TiebaForumAPI.protoPost(path: "/c/f/frs/page", cmd: "test") { $0 }
+      try await TiebaForumAPI.protoPost(path: "/c/f/frs/page", cmd: "test", makeRequest: makeRequest)
     }
   }
 
