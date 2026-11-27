@@ -16,6 +16,102 @@ struct TiebaThreadCardTarget {
   }
 
   static let unresolvedMessage = "暂时无法确定原帖子，请刷新后重试"
+  static let unresolvedReplyMessage = "暂时无法定位这条回复，请刷新动态后重试"
+
+  struct Opening {
+    enum Rule: Equatable {
+      enum OuterReason: String, Equatable {
+        case missingOrigin = "missing-origin"
+        case differentOriginPID = "different-origin-pid"
+      }
+
+      case standardCard, reference, personalizedOrigin
+      case personalizedOuter(OuterReason)
+      case invalidPersonalizedOrigin, invalidPersonalizedOuter
+
+      var requiresExactReply: Bool {
+        switch self {
+        case .personalizedOrigin, .personalizedOuter: return true
+        default: return false
+        }
+      }
+
+      var unresolvedMessage: String {
+        switch self {
+        case .invalidPersonalizedOrigin, .invalidPersonalizedOuter: return TiebaThreadCardTarget.unresolvedReplyMessage
+        default: return TiebaThreadCardTarget.unresolvedMessage
+        }
+      }
+    }
+
+    let target: TiebaThreadCardTarget?
+    let rule: Rule
+  }
+
+  static func opening(_ row: [String: Any], personalized: Bool, reference: Bool = false) -> Opening {
+    if reference { return Opening(target: quoted(row), rule: .reference) }
+    if personalized, let reply = personalizedReplyOpening(row) { return reply }
+    return Opening(target: card(row), rule: .standardCard)
+  }
+
+  private static func personalizedReplyOpening(_ row: [String: Any]) -> Opening? {
+    let cardID = TiebaViewModelMapper.firstPositiveID(row["id"])
+    let topicID = TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])
+    let postID = TiebaViewModelMapper.firstPositiveID(row["postId"], row["post_id"])
+    let firstPostID = TiebaViewModelMapper.firstPositiveID(row["firstPostId"], row["first_post_id"])
+    guard !isShare(row), !postID.isEmpty, !cardID.isEmpty, cardID == topicID,
+          firstPostID.isEmpty else { return nil }
+    guard let origin = TiebaViewModelMapper.originThreadInfo(row) else {
+      return outerReplyOpening(topicID: topicID, postID: postID, reason: .missingOrigin)
+    }
+    let originPID = TiebaViewModelMapper.firstPositiveID(origin["pid"])
+    guard originPID.isEmpty || originPID == postID else {
+      return outerReplyOpening(topicID: topicID, postID: postID, reason: .differentOriginPID)
+    }
+
+    // Personalized reply cards can repeat the card identity as threadId.
+    // The caller must verify that the origin topic actually contains postId.
+    let originID = TiebaViewModelMapper.firstPositiveID(origin["threadId"], origin["thread_id"], origin["tid"])
+    guard !originID.isEmpty, originID != postID else {
+      return Opening(target: nil, rule: .invalidPersonalizedOrigin)
+    }
+    return Opening(target: target(kind: .reply, id: originID, postId: postID, row: origin), rule: .personalizedOrigin)
+  }
+
+  private static func outerReplyOpening(
+    topicID: String, postID: String, reason: Opening.Rule.OuterReason
+  ) -> Opening {
+    guard topicID != postID else { return Opening(target: nil, rule: .invalidPersonalizedOuter) }
+    // The card alone does not tie its forum or the nested PID to this topic.
+    let candidate = Self(kind: .reply, threadId: topicID, postId: postID, forumId: nil, forumName: nil)
+    return Opening(target: candidate, rule: .personalizedOuter(reason))
+  }
+
+  struct VerificationGate {
+    struct Ticket: Equatable, Sendable {
+      fileprivate let generation: UInt64
+      let accountKey: String
+    }
+
+    private var generation: UInt64 = 0
+    private var pending: Ticket?
+
+    mutating func begin(accountKey: String) -> Ticket {
+      generation &+= 1
+      let ticket = Ticket(generation: generation, accountKey: accountKey)
+      pending = ticket
+      return ticket
+    }
+
+    mutating func cancel() { pending = nil }
+
+    /// nil means a later tap or cancellation owns the UI. false consumes an invalidated attempt.
+    mutating func finish(_ ticket: Ticket, accountKey: String, invalidated: Bool, isVisible: Bool) -> Bool? {
+      guard pending == ticket else { return nil }
+      pending = nil
+      return !invalidated && isVisible && accountKey == ticket.accountKey
+    }
+  }
 
   static func card(_ row: [String: Any], allowLegacyTopicID: Bool = false) -> Self? {
     let topicID = TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])

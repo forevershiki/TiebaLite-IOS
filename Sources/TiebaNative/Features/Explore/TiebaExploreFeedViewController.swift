@@ -36,6 +36,8 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   private var hasMore = false
   private var isLoading = false
   private var isLoadingMore = false
+  private var replyVerificationTask: Task<Void, Never>?
+  private var replyVerification = TiebaThreadCardTarget.VerificationGate()
   private var isUserRefresh = false
   private var lastLoadedAt = Date.distantPast
   private var lastRowSignature = ""
@@ -125,6 +127,16 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
     captureListScrollViewIfNeeded()
     // 行宽契约 = 列表宽 − 2×horizontalInset（内缩含内容列居中留白）。
     driver.updateWidth(list.bounds.width - list.horizontalInset * 2)
+  }
+
+  override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated)
+    cancelReplyVerification()
+  }
+
+  override func willMove(toParent parent: UIViewController?) {
+    super.willMove(toParent: parent)
+    if parent == nil { cancelReplyVerification() }
   }
 
   override func viewSafeAreaInsetsDidChange() {
@@ -346,6 +358,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   // MARK: - 数据
 
   private func reload() {
+    cancelReplyVerification()
     guard !isLoading else {
       cancelPendingTopAnchorRefresh()
       list.endRefreshing()
@@ -637,23 +650,95 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   // MARK: - 动作
 
   private func openThread(_ thread: [String: Any], reference: Bool = false) {
-    let target = reference ? TiebaThreadCardTarget.quoted(thread) : TiebaThreadCardTarget.card(thread)
+    cancelReplyVerification()
+    let opening = TiebaThreadCardTarget.opening(thread, personalized: segment == .personalized, reference: reference)
     #if DEBUG
     let source: TiebaReplyRoutingDiagnostics.Source = segment == .personalized ? .personalized : .concern
-    let tap = TiebaReplyRoutingDiagnostics.card(thread, target: target, source: source)
+    let tap = TiebaReplyRoutingDiagnostics.card(thread, target: opening.target, source: source, rule: opening.rule)
     #endif
-    guard let target else {
-      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+    guard let target = opening.target else {
+      pill.showResult(success: false, text: opening.rule.unresolvedMessage)
       return
     }
-    TiebaSceneHaptics.fire("press")
-    #if DEBUG
-    TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+    let navigate = { @MainActor in
+      TiebaSceneHaptics.fire("press")
+      #if DEBUG
+      TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
+        _ = TiebaNavigator.shared.navigate(target.route())
+      }
+      #else
       _ = TiebaNavigator.shared.navigate(target.route())
+      #endif
     }
-    #else
-    TiebaNavigator.shared.navigate(target.route())
-    #endif
+    guard opening.rule.requiresExactReply else {
+      navigate()
+      return
+    }
+
+    let account = TiebaPageCache.currentAccountKey()
+    let ticket = replyVerification.begin(accountKey: account)
+    pill.show(text: "正在定位回复", progress: nil)
+    replyVerificationTask = Task { @MainActor [weak self] in
+      // Observe synchronously on the posting thread, including an A → B → A switch.
+      let sessionChanged = TiebaMutex(false)
+      let observer = NotificationCenter.default.addObserver(
+        forName: TiebaSession.didChangeNotification, object: nil, queue: nil
+      ) { _ in sessionChanged.withLock { $0 = true } }
+      defer { NotificationCenter.default.removeObserver(observer) }
+      guard TiebaPageCache.currentAccountKey() == account, !Task.isCancelled else {
+        self?.finishReplyVerification(ticket, invalidated: true)
+        return
+      }
+
+      let sort = TiebaThreadViewController.defaultReplySort
+      let verify = { @MainActor in
+        try await TiebaThreadAPI.verifyReply(
+          threadId: target.threadId, postId: target.postId, forumId: target.forumId, sort: sort, accountKey: account
+        )
+      }
+      #if DEBUG
+      let attempt = tap.map(TiebaReplyRoutingDiagnostics.PageAttempt.init)
+      #endif
+      do {
+        #if DEBUG
+        let verified = try await TiebaReplyRoutingDiagnostics.$pageAttempt.withValue(attempt) { try await verify() }
+        #else
+        let verified = try await verify()
+        #endif
+        guard self?.finishReplyVerification(ticket, invalidated: sessionChanged.withLock { $0 }) == true else { return }
+        #if DEBUG
+        attempt?.verifiedForNavigation()
+        #endif
+        TiebaThreadAPI.$openingReplyPage.withValue(verified) { navigate() }
+      } catch {
+        guard let self, self.finishReplyVerification(
+          ticket, invalidated: error is CancellationError || sessionChanged.withLock { $0 }
+        ) else { return }
+        #if DEBUG
+        attempt?.saveFailure(verifyingReply: true, error: error)
+        #endif
+        self.pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedReplyMessage)
+      }
+    }
+  }
+
+  @discardableResult
+  private func finishReplyVerification(_ ticket: TiebaThreadCardTarget.VerificationGate.Ticket, invalidated: Bool) -> Bool {
+    guard let allowed = replyVerification.finish(
+      ticket, accountKey: TiebaPageCache.currentAccountKey(), invalidated: invalidated || Task.isCancelled,
+      isVisible: viewIfLoaded?.window != nil && view.isUserInteractionEnabled
+    ) else { return false }
+    replyVerificationTask = nil
+    pill.hide()
+    return allowed
+  }
+
+  private func cancelReplyVerification() {
+    replyVerification.cancel()
+    guard let replyVerificationTask else { return }
+    replyVerificationTask.cancel()
+    self.replyVerificationTask = nil
+    pill.hide()
   }
 
   private func shareThread(_ thread: [String: Any]) {

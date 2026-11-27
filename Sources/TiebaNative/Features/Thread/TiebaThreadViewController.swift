@@ -48,6 +48,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
   private nonisolated(unsafe) var composerToken: NSObjectProtocol?
   private var changedFloor: (account: String, id: String)?
   private var pendingPostFocus: String?
+  private var openingReplyPage = TiebaThreadAPI.openingReplyPage
   /// 长帖保留上限（原 MAX_POSTS）：头楼保留，其余丢弃最早追加的尾部之外的头。
   private static let maxPosts = 400
   /// 上一轮 publish 的模型 + 行指纹（键 = post id）：行内容未变的行直接复用
@@ -89,14 +90,17 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
     self.seeLz = seeLz || (fromFavorites && collectSeeLz)
     // 默认回复排序（issue #10）：偏好键 defaultPostSort，value = TiebaThreadSort.rawValue。
     // 收藏页的"倒序查看"优先于全局默认档。
-    let defaultPostSort = TiebaThreadSort(
+    self.sort = (fromFavorites && collectDescSort) ? .desc : Self.defaultReplySort
+    self.isCollected = fromFavorites
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  static var defaultReplySort: TiebaThreadSort {
+    TiebaThreadSort(
       rawValue: Int(
         TiebaPreferences.string("defaultPostSort", allowed: ["2", "0", "1"], default: "2")
       ) ?? TiebaThreadSort.hot.rawValue
     ) ?? .hot
-    self.sort = (fromFavorites && collectDescSort) ? .desc : defaultPostSort
-    self.isCollected = fromFavorites
-    super.init(nibName: nil, bundle: nil)
   }
 
   var canonicalForumName: String {
@@ -182,6 +186,9 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
+    #if DEBUG
+    if !hasAppeared { replyRoutingTap?.detailDidAppear(threadId: threadId, postId: postId) }
+    #endif
     hasAppeared = true
     (parent as? TiebaRouteHostViewController)?.syncNativeScreenChrome()
     refreshChangedFloor()
@@ -260,8 +267,16 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         self.isUserRefresh = false
         self.list.endRefreshing()
       }
+      let verified = self.openingReplyPage
+      self.openingReplyPage = nil
       let load = { @MainActor in
-        try await TiebaThreadAPI.page(
+        if let verified, !self.isUserRefresh, verified.matches(
+          threadId: self.threadId, postId: self.postId, accountKey: TiebaPageCache.currentAccountKey(),
+          sort: self.sort, seeLz: self.seeLz
+        ) {
+          return verified.page
+        }
+        return try await TiebaThreadAPI.page(
           threadId: self.threadId,
           page: 1,
           postId: self.postId,
@@ -294,7 +309,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       } catch {
         guard generation == self.loadGeneration else { return }
         #if DEBUG
-        if !(error is CancellationError), !Task.isCancelled { attempt?.saveFailure() }
+        if !(error is CancellationError), !Task.isCancelled { attempt?.saveFailure(error: error) }
         #endif
         if self.posts.isEmpty {
           self.showState(.error(error.localizedDescription))

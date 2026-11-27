@@ -11,7 +11,10 @@ struct DynamicReplyRoutingTests {
   static func feedRow(_ thread: Tieba_ThreadInfo) throws -> [String: Any] {
     var response = Tieba_PersonalizedResponse()
     response.data.threadList = [thread]
-    let wire = try response.serializedData()
+    return try feedRow(response.serializedData())
+  }
+
+  static func feedRow(_ wire: Data) throws -> [String: Any] {
     let decoded = try TiebaSwiftProto.decode(messagePath: "tieba.personalized.PersonalizedResponse", bytes: wire)
     let mapped = TiebaViewModelMapper.mapResponse(mapper: "feedThreadList", decoded: decoded, options: [:])
     guard let row = (mapped as? [[String: Any]])?.first?["threadInfo"] as? [String: Any] else {
@@ -30,13 +33,13 @@ struct DynamicReplyRoutingTests {
     return try response.serializedData()
   }
 
-  static func open(_ route: TiebaRoute, page: Int = 1) async throws {
+  static func open(_ route: TiebaRoute, page: Int = 1, requiresExactReply: Bool = false) async throws {
     guard case .thread(let kz, let pid, let seeLz, _, let fid, _) = route else {
       throw FixtureFailure("Expected thread route")
     }
     _ = try await TiebaThreadAPI.page(
       threadId: kz, page: page, postId: page == 1 ? pid : nil, seeLz: seeLz, sort: .hot, forumId: fid,
-      preferCache: false, allowStaleOnError: false
+      preferCache: false, allowStaleOnError: false, requiresExactReply: requiresExactReply
     )
   }
 
@@ -59,7 +62,7 @@ struct DynamicReplyRoutingTests {
 
   static func verify(
     _ target: TiebaThreadCardTarget?, kind: TiebaThreadCardTarget.Kind, kz: Int64, pid: Int64?,
-    fid: Int64?, name: String?
+    fid: Int64?, name: String?, requiresExactReply: Bool = false
   ) async throws {
     guard let target else { throw FixtureFailure("Missing target for \(kz)") }
     let expected = TiebaRoute.thread(
@@ -69,7 +72,7 @@ struct DynamicReplyRoutingTests {
     try expect(target.kind == kind && route == expected, "Wrong target: \(route.signature)")
     try expect(TiebaRouteTable.parse(path: route.signature) == expected, "Route round trip")
     await PageTransport.shared.arrange([.success(try pageData(kz: kz, pid: pid))])
-    try await open(route)
+    try await open(route, requiresExactReply: requiresExactReply)
     let requests = try await PageTransport.shared.pageRequests()
     try expect(requests.count == 1, "One pb/page read")
     let request = requests[0]
@@ -79,10 +82,242 @@ struct DynamicReplyRoutingTests {
     try expect(request.pn == (pid == nil ? 1 : 0), "Wire pn")
   }
 
+  static func verifyPersonalizedReply() async throws {
+    // Reconstruct a packet from the real mapped fields. The original wire
+    // presence is unknown, so this is a fixture, not a captured response.
+    let cardID: Int64 = 2_100_000_009_798_432
+    let threadID: Int64 = 11_230_786_026
+    let postID: Int64 = 154_184_058_416
+    let forumID: Int64 = 1_937_070
+    var thread = Tieba_ThreadInfo()
+    thread.id = cardID
+    thread.threadID = cardID
+    thread.postID = postID
+    thread.forumID = forumID
+    thread.originThreadInfo.tid = String(threadID)
+    let row = try feedRow(thread)
+    try expect(row["id"] as? String == String(cardID) && row["threadId"] as? String == String(cardID), "Mapper keeps both outer IDs")
+    let opening = TiebaThreadCardTarget.opening(row, personalized: true)
+    try expect(opening.rule == .personalizedOrigin, "Verify personalized origin before navigation")
+    try await verify(opening.target, kind: .reply, kz: threadID, pid: postID, fid: nil, name: nil, requiresExactReply: true)
+    try await verifyReplyHandoff(opening.target, kz: threadID, pid: postID)
+    try await verify(
+      TiebaThreadCardTarget.opening(row, personalized: false).target,
+      kind: .reply, kz: cardID, pid: postID, fid: forumID, name: nil
+    )
+    try await verify(
+      TiebaThreadCardTarget.opening(row, personalized: true, reference: true).target,
+      kind: .reference, kz: threadID, pid: nil, fid: nil, name: nil
+    )
+
+    thread.originThreadInfo.fid = 42
+    let withOriginForum = try feedRow(thread)
+    try await verify(
+      TiebaThreadCardTarget.opening(withOriginForum, personalized: true).target,
+      kind: .reply, kz: threadID, pid: postID, fid: 42, name: nil, requiresExactReply: true
+    )
+
+    var invalidOrigin = thread
+    invalidOrigin.originThreadInfo.tid = ""
+    let noOriginID = try feedRow(invalidOrigin)
+    let unresolved = TiebaThreadCardTarget.opening(noOriginID, personalized: true)
+    try expect(unresolved.rule == .invalidPersonalizedOrigin && unresolved.target == nil, "Missing origin KZ cannot use outer card ID")
+    invalidOrigin.originThreadInfo.tid = String(postID)
+    let originRepeatsPID = try feedRow(invalidOrigin)
+    try expect(TiebaThreadCardTarget.opening(originRepeatsPID, personalized: true).target == nil, "Origin KZ cannot be PID")
+
+    var noAnchor = thread
+    noAnchor.postID = 0
+    let noPost = try feedRow(noAnchor)
+    let legacyReference = TiebaThreadCardTarget.opening(noPost, personalized: true)
+    try expect(legacyReference.rule == .standardCard, "Without a PID there is no personalized reply to verify")
+    try await verify(legacyReference.target, kind: .reference, kz: threadID, pid: nil, fid: 42, name: nil)
+
+    var share = thread
+    share.isShareThread = 1
+    let shared = try feedRow(share)
+    try await verify(
+      TiebaThreadCardTarget.opening(shared, personalized: true).target,
+      kind: .reference, kz: threadID, pid: nil, fid: 42, name: nil
+    )
+
+    var ordinary = thread
+    ordinary.id = threadID
+    ordinary.threadID = threadID
+    ordinary.firstPostID = 789
+    ordinary.originThreadInfo.tid = "321"
+    let ordinaryRow = try feedRow(ordinary)
+    let ordinaryOpening = TiebaThreadCardTarget.opening(ordinaryRow, personalized: true)
+    try expect(ordinaryOpening.rule == .standardCard, "Ordinary reply keeps its own thread beside an unrelated quote")
+    try await verify(ordinaryOpening.target, kind: .reply, kz: threadID, pid: postID, fid: forumID, name: nil)
+
+    var sameID = thread
+    sameID.id = threadID
+    sameID.threadID = threadID
+    sameID.originThreadInfo.fid = 0
+    let coincidentIDs = try feedRow(sameID)
+    try await verify(
+      TiebaThreadCardTarget.opening(coincidentIDs, personalized: true).target,
+      kind: .reply, kz: threadID, pid: postID, fid: nil, name: nil, requiresExactReply: true
+    )
+
+    guard let route = opening.target?.route() else { throw FixtureFailure("Missing origin candidate") }
+    try await rejectUnverifiedReply(route, response: pageData(kz: threadID, pid: nil), error: .missingAnchor)
+    try await rejectUnverifiedReply(route, response: pageData(kz: 321, pid: postID), error: .unexpectedThread)
+    try await rejectUnverifiedReply(route, response: pageData(kz: 0, pid: postID), error: .unexpectedThread)
+    try await verifyAmbiguousOuterReplies(template: thread, kz: threadID, pid: postID)
+
+    TiebaReplyRoutingDiagnostics.enabled = true
+    defer { TiebaReplyRoutingDiagnostics.enabled = false }
+    let debugRow = try feedRow(sameID)
+    let raw = debugRow[TiebaReplyRoutingDiagnostics.presenceKey] as? String ?? ""
+    try expect(raw.contains("post_id#52=present") && raw.contains("firstPostId#40=absent"), "Capture presence from wire tags")
+    try expect(raw.contains("wire OriginThreadInfo: tid#5=present fid#7=absent pid#25=absent"), "Capture absent origin FID and PID on wire")
+    // PersonalizedResponse.data#2 > thread_list#2 > id#1=123, post_id#52=0.
+    let explicitZero = try feedRow(Data([0x12, 0x07, 0x12, 0x05, 0x08, 0x7b, 0xa0, 0x03, 0x00]))
+    let zeroRaw = explicitZero[TiebaReplyRoutingDiagnostics.presenceKey] as? String ?? ""
+    try expect(
+      zeroRaw.contains("post_id#52=present") && explicitZero["postId"] as? String == "",
+      "Wire presence survives proto3 dropping an explicit zero"
+    )
+    guard let tap = TiebaReplyRoutingDiagnostics.card(
+      debugRow, target: opening.target, source: .personalized, rule: opening.rule
+    ) else { throw FixtureFailure("Expected personalized reply diagnostics") }
+    TiebaReplyRoutingDiagnostics.PageAttempt(tap).saveFailure(verifyingReply: true)
+    let report = TiebaReplyRoutingDiagnostics.latestFailure ?? ""
+    try expect(
+      report.contains("kz=OriginThreadInfo.tid#5") && report.contains("pid=ThreadInfo.post_id#52")
+        && report.contains("fid=omitted no trusted origin FID"),
+      "Diagnostic identifies every coordinate source"
+    )
+  }
+
+  static func verifyAmbiguousOuterReplies(template: Tieba_ThreadInfo, kz: Int64, pid: Int64) async throws {
+    var rejected = Tieba_PbPage_PbPageResponse()
+    rejected.error.errorCode = 4
+    let codeFour = try rejected.serializedData()
+
+    var missingOrigin = template
+    missingOrigin.clearOriginThreadInfo()
+    let missingOriginRow = try feedRow(missingOrigin)
+    let unknown = TiebaThreadCardTarget.opening(missingOriginRow, personalized: true)
+    try expect(unknown.rule == .personalizedOuter(.missingOrigin) && unknown.rule.requiresExactReply, "No origin requires proof of outer KZ")
+    guard let unknownRoute = unknown.target?.route() else { throw FixtureFailure("Missing outer candidate") }
+    try await rejectUnverifiedReply(unknownRoute, response: codeFour, error: .business(4, ""))
+
+    // The same shape can be an ordinary reply with a valid outer KZ.
+    var ordinary = missingOrigin
+    ordinary.id = kz
+    ordinary.threadID = kz
+    let ordinaryRow = try feedRow(ordinary)
+    let ordinaryOpening = TiebaThreadCardTarget.opening(ordinaryRow, personalized: true)
+    try expect(ordinaryOpening.rule.requiresExactReply, "Unqualified equality is not proof either way")
+    try await verify(ordinaryOpening.target, kind: .reply, kz: kz, pid: pid, fid: nil, name: nil, requiresExactReply: true)
+
+    var conflict = template
+    conflict.originThreadInfo.pid = 789
+    let conflictRow = try feedRow(conflict)
+    let conflictingOpening = TiebaThreadCardTarget.opening(conflictRow, personalized: true)
+    try expect(
+      conflictingOpening.rule == .personalizedOuter(.differentOriginPID) && conflictingOpening.rule.requiresExactReply,
+      "Conflicting origin PID cannot trigger direct navigation"
+    )
+    guard let conflictingRoute = conflictingOpening.target?.route() else { throw FixtureFailure("Missing conflict candidate") }
+    try await rejectUnverifiedReply(conflictingRoute, response: codeFour, error: .business(4, ""))
+
+    conflict.originThreadInfo.tid = "321"
+    conflict.id = kz
+    conflict.threadID = kz
+    let unrelatedQuoteRow = try feedRow(conflict)
+    let unrelatedQuote = TiebaThreadCardTarget.opening(unrelatedQuoteRow, personalized: true)
+    try await verify(unrelatedQuote.target, kind: .reply, kz: kz, pid: pid, fid: nil, name: nil, requiresExactReply: true)
+    try await verify(
+      TiebaThreadCardTarget.opening(unrelatedQuoteRow, personalized: true, reference: true).target,
+      kind: .reference, kz: 321, pid: nil, fid: 42, name: nil
+    )
+
+    missingOrigin.id = pid
+    missingOrigin.threadID = pid
+    let pidAsTopic = try feedRow(missingOrigin)
+    let invalid = TiebaThreadCardTarget.opening(pidAsTopic, personalized: true)
+    try expect(invalid.rule == .invalidPersonalizedOuter && invalid.target == nil, "Reject a candidate equal to the target PID")
+  }
+
+  static func verifyReplyHandoff(_ target: TiebaThreadCardTarget?, kz: Int64, pid: Int64) async throws {
+    guard let target else { throw FixtureFailure("Missing verified-reply target") }
+    let firstPage = try pageData(kz: kz, pid: pid)
+    let nextPage = try pageData(kz: kz, pid: nil)
+    await PageTransport.shared.arrange([.success(firstPage), .success(firstPage), .success(nextPage)])
+    let verified = try await TiebaThreadAPI.verifyReply(
+      threadId: target.threadId, postId: target.postId, forumId: target.forumId, sort: .hot, accountKey: "synthetic"
+    )
+    let received = TiebaThreadAPI.$openingReplyPage.withValue(verified) { TiebaThreadAPI.openingReplyPage }
+    try expect(received?.matches(
+      threadId: String(kz), postId: String(pid), accountKey: "synthetic", sort: .hot, seeLz: false
+    ) == true, "First load can render the verified page directly")
+    try expect(received?.page.posts.contains { $0.id == String(pid) } == true, "Handed-off page contains the scroll anchor")
+    try expect(received?.matches(
+      threadId: String(kz), postId: String(pid), accountKey: "another-account", sort: .hot, seeLz: false
+    ) == false, "A different account cannot consume the handoff")
+    try expect(TiebaThreadAPI.openingReplyPage == nil, "Handoff cannot leak into later navigation")
+    let initial = try await PageTransport.shared.pageRequests()
+    try expect(initial.count == 1, "Verification and first render use one request")
+
+    try await open(target.route())
+    try await open(target.route(), page: 2)
+    let requests = try await PageTransport.shared.pageRequests()
+    try expect(requests.map(\.kz) == [kz, kz, kz], "Refresh and pagination retain the verified KZ")
+    try expect(requests.map(\.pid) == [pid, pid, 0] && requests.map(\.pn) == [0, 0, 2], "Refresh keeps PID; pagination drops it")
+    try expect(requests.map(\.hasPid) == [true, true, false] && requests.allSatisfy { !$0.hasForumID }, "Wire field presence")
+  }
+
+  static func verifyNavigationOwnership() throws {
+    var gate = TiebaThreadCardTarget.VerificationGate()
+    let older = gate.begin(accountKey: "a")
+    let newer = gate.begin(accountKey: "a")
+    let oldFinish = gate.finish(older, accountKey: "a", invalidated: false, isVisible: true)
+    let newFinish = gate.finish(newer, accountKey: "a", invalidated: false, isVisible: true)
+    let duplicate = gate.finish(newer, accountKey: "a", invalidated: false, isVisible: true)
+    try expect(oldFinish == nil && newFinish == true && duplicate == nil, "Only the latest tap may navigate once")
+
+    let leaving = gate.begin(accountKey: "a")
+    let hidden = gate.finish(leaving, accountKey: "a", invalidated: false, isVisible: false)
+    try expect(hidden == false, "A hidden segment cannot navigate")
+    let refreshing = gate.begin(accountKey: "a")
+    gate.cancel()
+    let invalidated = gate.finish(refreshing, accountKey: "a", invalidated: false, isVisible: true)
+    try expect(invalidated == nil, "Refresh or departure invalidates the outstanding tap")
+    let startedOnA = gate.begin(accountKey: "a")
+    let switched = gate.finish(startedOnA, accountKey: "b", invalidated: false, isVisible: true)
+    try expect(switched == false, "Different account rejects a late result")
+    let startedBeforeSwitch = gate.begin(accountKey: "a")
+    let switchedBack = gate.finish(startedBeforeSwitch, accountKey: "a", invalidated: true, isVisible: true)
+    try expect(switchedBack == false, "A session change invalidates the result even if the account switched back")
+  }
+
+  static func rejectUnverifiedReply(
+    _ route: TiebaRoute, response: Data, error expected: TiebaThreadPageError
+  ) async throws {
+    guard case .thread(let kz, let pid, _, _, let fid, _) = route else {
+      throw FixtureFailure("Missing verification coordinates")
+    }
+    await PageTransport.shared.arrange([.success(response)])
+    do {
+      _ = try await TiebaThreadAPI.verifyReply(threadId: kz, postId: pid, forumId: fid, sort: .hot, accountKey: "synthetic")
+      throw FixtureFailure("Unconfirmed personalized reply opened")
+    } catch let failure as TiebaThreadPageError {
+      try expect(failure == expected, "Reject unverified navigation")
+    }
+    let requests = try await PageTransport.shared.pageRequests()
+    try expect(requests.count == 1 && requests[0].hasPid, "Verification cannot retry without the anchor")
+  }
+
   static func main() async throws {
     guard CommandLine.arguments.count == 2 else { throw FixtureFailure("Pass the descriptor file path") }
     let descriptors = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
     try TiebaProtoRegistry.shared.initialize(json: descriptors)
+    try verifyNavigationOwnership()
+    try await verifyPersonalizedReply()
 
     let topicName = "yy小说吧"
     let special = "测试 A&B#50%/字面%2F吧"
@@ -256,7 +491,10 @@ struct DynamicReplyRoutingTests {
     defer { TiebaReplyRoutingDiagnostics.enabled = false }
     _ = TiebaReplyRoutingDiagnostics.card(orphan, target: nil, source: .personalized)
     let unresolved = TiebaReplyRoutingDiagnostics.latestFailure
-    try expect(unresolved?.contains("result=unresolved") == true, "Record unresolvable card without a request")
+    try expect(
+      unresolved?.contains("result=unresolved request=none network=not-started navigation=not-opened") == true,
+      "Record unresolvable card without a request"
+    )
 
     let row = try feedRow(reply)
     var concernThread = reply
@@ -293,9 +531,13 @@ struct DynamicReplyRoutingTests {
       }
       throw FixtureFailure("Expected business code 4")
     } catch TiebaThreadPageError.business(4, _) {
-      attempt.saveFailure()
+      attempt.saveFailure(verifyingReply: true, error: TiebaThreadPageError.business(4, "SYNTHETIC_MESSAGE"))
     }
     let report = TiebaReplyRoutingDiagnostics.latestFailure ?? ""
+    try expect(
+      report.contains("reason=business-4 network=response-received navigation=not-opened") && !report.contains("SYNTHETIC_MESSAGE"),
+      "Diagnose rejected verification without logging server text"
+    )
     for line in [
       "tap source=personalized kind=reply", "route: kz=123 pid=456 fid=31",
       "request /c/f/pb/page kz=123 pid=456 fid=31 pn=0",

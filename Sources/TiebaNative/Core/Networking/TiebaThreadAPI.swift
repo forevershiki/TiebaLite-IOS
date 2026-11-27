@@ -154,6 +154,32 @@ struct TiebaThreadFloorPage: Sendable {
 // MARK: - 数据访问
 
 enum TiebaThreadAPI {
+  struct VerifiedReplyPage: Sendable {
+    let threadId: String
+    let postId: String?
+    let accountKey: String
+    let sort: TiebaThreadSort
+    let page: TiebaThreadPage
+
+    func matches(threadId: String, postId: String?, accountKey: String, sort: TiebaThreadSort, seeLz: Bool) -> Bool {
+      !seeLz && self.threadId == threadId && self.postId == postId
+        && self.accountKey == accountKey && self.sort == sort
+    }
+  }
+
+  // Scoped to the Navigator's synchronous construction of the detail controller.
+  @TaskLocal static var openingReplyPage: VerifiedReplyPage? = nil
+
+  static func verifyReply(
+    threadId: String, postId: String?, forumId: String?, sort: TiebaThreadSort, accountKey: String
+  ) async throws -> VerifiedReplyPage {
+    let result = try await page(
+      threadId: threadId, page: 1, postId: postId, seeLz: false, sort: sort,
+      forumId: forumId, requiresExactReply: true
+    )
+    return VerifiedReplyPage(threadId: threadId, postId: postId, accountKey: accountKey, sort: sort, page: result)
+  }
+
   /// 帖子页：优先读持久缓存（SWR），成功写原始 protobuf Data，失败回退最近缓存。
   /// 缓存键含账号、主题、页码、锚点和排序条件。不同入口可复用同一主题的缓存。
   ///
@@ -169,13 +195,15 @@ enum TiebaThreadAPI {
     sort: TiebaThreadSort,
     forumId: String? = nil,
     preferCache: Bool = true,
-    allowStaleOnError: Bool = true
+    allowStaleOnError: Bool = true,
+    requiresExactReply: Bool = false
   ) async throws -> TiebaThreadPage {
     let request = try TiebaThreadPageRequest(
       threadId: threadId, postId: postId, forumId: forumId, page: page
     )
     let threadId = String(request.threadID)
     let anchor = request.pageNumber == 0 ? request.postID.map { String($0) } : nil
+    guard !requiresExactReply || anchor != nil else { throw TiebaThreadPageError.missingAnchor }
     let scope = cacheScope(
       threadId: threadId,
       page: page,
@@ -189,9 +217,15 @@ enum TiebaThreadAPI {
          maxStale: TiebaPageCacheKind.thread.maxStale
        ),
        TiebaPageCache.isScopeCurrent(scope),
-       let cached = try? await decodePageData(entry.payload, threadId: threadId, page: page, anchor: anchor) {
+       !requiresExactReply || entry.isFresh(),
+       let cached = try? await decodePageData(
+         entry.payload, threadId: threadId, page: page, anchor: anchor, requireThreadIdentity: requiresExactReply
+       ) {
       try Task.checkCancellation()
       guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
+      #if DEBUG
+      TiebaReplyRoutingDiagnostics.pageAttempt?.loadedFromCache()
+      #endif
       if entry.isFresh() == false {
         scheduleRevalidate(
           scope: scope,
@@ -213,17 +247,22 @@ enum TiebaThreadAPI {
         seeLz: seeLz,
         sort: sort
       )
-      let result = try await decodePageData(data, threadId: threadId, page: page, anchor: anchor, networkRequest: request)
+      #if DEBUG
+      TiebaReplyRoutingDiagnostics.pageAttempt?.receivedBody()
+      #endif
+      let result = try await decodePageData(
+        data, threadId: threadId, page: page, anchor: anchor, networkRequest: request,
+        requireThreadIdentity: requiresExactReply
+      )
       try Task.checkCancellation()
       guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
-      TiebaPageCache.shared.storeInBackground(
-        scope: scope,
-        payload: data,
-        ttl: TiebaPageCacheKind.thread.freshTTL
-      )
+      // The feed checks session and tap ownership before handing off this page.
+      if !requiresExactReply {
+        TiebaPageCache.shared.storeInBackground(scope: scope, payload: data, ttl: TiebaPageCacheKind.thread.freshTTL)
+      }
       return result
     } catch {
-      if anchor != nil, let error = error as? TiebaThreadPageError, error.allowsUnanchoredLookup {
+      if !requiresExactReply, anchor != nil, let error = error as? TiebaThreadPageError, error.allowsUnanchoredLookup {
         try Task.checkCancellation()
         guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
         // The requested floor can disappear independently of the thread.
@@ -232,7 +271,7 @@ enum TiebaThreadAPI {
           forumId: forumId, preferCache: preferCache, allowStaleOnError: allowStaleOnError
         )
       }
-      if allowStaleOnError, TiebaPageCache.isScopeCurrent(scope),
+      if !requiresExactReply, allowStaleOnError, TiebaPageCache.isScopeCurrent(scope),
          (TiebaPageCache.shouldFallbackToCache(error) || (error as? TiebaThreadPageError)?.allowsStaleCache == true),
          let entry = await TiebaPageCache.shared.load(
            scope: scope,
@@ -334,7 +373,8 @@ enum TiebaThreadAPI {
     threadId: String,
     page: Int,
     anchor: String?,
-    networkRequest: TiebaThreadPageRequest? = nil
+    networkRequest: TiebaThreadPageRequest? = nil,
+    requireThreadIdentity: Bool = false
   ) async throws -> TiebaThreadPage {
     let started = DispatchTime.now().uptimeNanoseconds
     #if DEBUG
@@ -364,10 +404,13 @@ enum TiebaThreadAPI {
       if data.hasThread {
         let info = data.thread
         let responseID = info.threadID > 0 ? info.threadID : info.id
+        if requireThreadIdentity, responseID <= 0 { throw TiebaThreadPageError.unexpectedThread }
         if responseID > 0, String(responseID) != threadId {
           throw TiebaThreadPageError.unexpectedThread
         }
         if info.isDeleted == 1 { throw TiebaThreadPageError.deleted }
+      } else if requireThreadIdentity {
+        throw TiebaThreadPageError.unexpectedThread
       }
       let result = makePage(data, threadId: threadId, page: page)
       if let anchor, !result.posts.contains(where: { $0.id == anchor }) {

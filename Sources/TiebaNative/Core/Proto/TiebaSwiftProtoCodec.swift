@@ -116,7 +116,15 @@ enum TiebaSwiftProto {
     }
     let json = try decode(bytes)
     let obj = try JSONSerialization.jsonObject(with: json)
-    return try normalize(obj, messagePath: messagePath) as? [String: Any] ?? [:]
+    let normalized = try normalize(obj, messagePath: messagePath) as? [String: Any] ?? [:]
+    #if DEBUG
+    if messagePath == "tieba.personalized.PersonalizedResponse", TiebaReplyRoutingDiagnostics.enabled {
+      var decoded = normalized
+      TiebaReplyRoutingDiagnostics.addPersonalizedWirePresence(bytes, to: &decoded)
+      return decoded
+    }
+    #endif
+    return normalized
   }
 
   // ── 描述符驱动归一化 ──

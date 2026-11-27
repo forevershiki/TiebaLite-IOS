@@ -245,6 +245,9 @@ enum TiebaFeedAPI {
       guard var thread = item["threadInfo"] as? [String: Any], thread["id"] is String else { return nil }
       // Older snapshots retained display FID but lost evidence of disagreement.
       if thread["routingForumId"] == nil { thread["routingForumId"] = "" }
+      #if DEBUG
+      thread[TiebaReplyRoutingDiagnostics.presenceKey] = "raw: unavailable (cached feed snapshot)"
+      #endif
       var item = item
       item["threadInfo"] = thread
       return item

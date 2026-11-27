@@ -53,7 +53,11 @@ def check_sources():
     assert 'if ids.count > 1 { return "" }' in mapper
     explore = read("Features/Explore/TiebaExploreFeedViewController.swift")
     assert 'return items[index]["threadInfo"] as? [String: Any]' in explore
-    assert "TiebaThreadCardTarget.unresolvedMessage" in explore
+    assert "opening.rule.unresolvedMessage" in explore and "static let unresolvedMessage" in resolver
+    assert "personalized: segment == .personalized, reference: reference" in explore
+    assert "guard opening.rule.requiresExactReply" in explore
+    assert "reason: .missingOrigin" in resolver and "reason: .differentOriginPID" in resolver
+    assert "return Opening(target: candidate, rule: .personalizedOuter(reason))" in resolver
     assert "allowLegacyTopicID: true" not in explore
     assert "TiebaThreadCardTarget.explicit(threadId: item.threadId, postId: item.postId)" in read(
         "Features/Messages/TiebaMessageListViewController.swift"
@@ -70,11 +74,19 @@ def check_sources():
         "Core/Networking/TiebaFeedAPI.swift"
     )
     api = read("Core/Networking/TiebaThreadAPI.swift")
+    assert "static func verifyReply(" in api and "forumId: forumId, requiresExactReply: true" in api
+    assert "if !requiresExactReply, anchor != nil" in api
+    assert "requireThreadIdentity: requiresExactReply" in api
     assert "TiebaReplyRoutingDiagnostics.pageAttempt?.request(parameters)" in api
     assert "attempt?.response(networkRequest, code: response.error.errorCode)" in api
+    codec = read("Core/Proto/TiebaSwiftProtoCodec.swift")
+    assert "TiebaReplyRoutingDiagnostics.addPersonalizedWirePresence(bytes, to: &decoded)" in codec
     view = read("Features/Thread/TiebaThreadViewController.swift")
     assert "TiebaReplyRoutingDiagnostics.navigationTap" in view
     assert "TiebaReplyRoutingDiagnostics.$pageAttempt.withValue(attempt)" in view
+    assert "forName: TiebaSession.didChangeNotification" in explore
+    assert "self?.finishReplyVerification(ticket" in explore and "$openingReplyPage.withValue(verified)" in explore
+    assert "self.openingReplyPage = nil" in view and "return verified.page" in view
     settings = read("Features/Settings/TiebaMoreSettingsViewController.swift")
     assert 'id: "replyRoutingDiagnostics", kind: .toggle' in settings
     assert "TiebaClipboard.setString(report)" in settings
