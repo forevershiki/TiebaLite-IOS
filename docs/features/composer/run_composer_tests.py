@@ -74,14 +74,16 @@ def check_syntax():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-sources", action="store_true", help="run source checks without swiftc")
+    parser.add_argument("--suite-only", action="store_true", help="skip separately scheduled retry and deep-link suites")
     parser.add_argument("--swift-syntax", action="store_true", help="also parse Swift with tree-sitter and tree-sitter-swift")
     args = parser.parse_args()
     check_sources()
     if args.swift_syntax:
         check_syntax()
     if args.check_sources:
-        for suite in BASELINE:
-            subprocess.run([sys.executable, str(suite), "--check-sources"], check=True, timeout=30)
+        if not args.suite_only:
+            for suite in BASELINE:
+                subprocess.run([sys.executable, str(suite), "--check-sources"], check=True, timeout=30)
         return
 
     swiftc = shutil.which("swiftc")
@@ -94,8 +96,9 @@ def main():
             *(str(file) for file in [*CORE, TEST]), "-o", str(executable),
         ], check=True, timeout=120)
         subprocess.run([str(executable)], check=True, timeout=30)
-    for suite in BASELINE:
-        subprocess.run([sys.executable, str(suite)], check=True, timeout=150)
+    if not args.suite_only:
+        for suite in BASELINE:
+            subprocess.run([sys.executable, str(suite)], check=True, timeout=150)
 
 
 if __name__ == "__main__":

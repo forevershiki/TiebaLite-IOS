@@ -197,8 +197,8 @@ enum TiebaMessageAPI {
     var item = TiebaMessageItem()
     item.tab = tab
     let replyer = (raw["replyer"] as? [String: Any]) ?? (raw["replyer_info"] as? [String: Any]) ?? [:]
-    let threadId = text(raw["thread_id"] ?? raw["threadId"] ?? raw["tid"])
-    let postId = text(raw["post_id"] ?? raw["postId"] ?? raw["pid"])
+    let threadId = TiebaViewModelMapper.firstPositiveID(raw["thread_id"], raw["threadId"], raw["tid"])
+    let postId = TiebaViewModelMapper.firstPositiveID(raw["post_id"], raw["postId"], raw["pid"])
     item.threadId = threadId
     item.postId = postId
     item.id = text(raw["id"] ?? raw["reply_id"] ?? raw["msg_id"])

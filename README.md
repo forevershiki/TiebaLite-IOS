@@ -88,11 +88,14 @@ Tools/                     占位描述文件生成、产物隐私清洗
 
 ## 🤖 GitHub Actions 自动打包（未签名 IPA）
 
-仓库自带工作流 [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml)：在 GitHub 的 macOS runner 上用 Bazel 出真机 arm64 产物（ad-hoc 身份 = 无签名口径）并打包 `.ipa`。
+[`Build iOS Unsigned IPA`](.github/workflows/build-ipa.yml) 在 GitHub 的 macOS 26 Runner 上执行 Python 源码检查和 Swift 离线回归。测试通过后，用仓库固定版本的 Bazel 编译真机 arm64 应用并打包 ad-hoc IPA，最低支持 iOS 17。
 
 **两种触发方式：**
 
-1. **手动构建**：仓库页 → **Actions** → **Build iOS Unsigned IPA** → **Run workflow**（可选 Release / Debug）→ 一次同时编译 `main` 与 `ios17` 两个分支，在本次运行页面下载两个 Artifact：`TiebaLite-<版本>.ipa`（**iOS 26+**）与 `TiebaLite-<版本>-IOS17.ipa`（**最低 iOS 17**，同一套功能）；
+1. **手动构建**。在 **Actions → Build iOS Unsigned IPA → Run workflow** 选择分支（例如 `feat/full-interaction`）及 Release 或 Debug。留空 `tag_name` 即只构建和上传 Artifact。
+2. **发布构建**。推送 `v*` tag 或手动填写 `tag_name`，且测试、编译和产物上传全部成功后，发布 GitHub Release。
+
+运行成功后，在该次运行的 **Summary → Artifacts** 下载 `ipa-<完整 Commit SHA>` 并解压。普通手动构建内含 `TiebaLite-unsigned-<完整 Commit SHA>.ipa`，带 tag 时文件名也包含 tag。IPA Artifact 保留 30 天。失败时可在对应步骤查看编译和测试输出，并下载保留 14 天的 `diagnostics-<完整 Commit SHA>` 查看工具链和阶段状态。
 
 ## 📱 通过 SideStore / AltStore 安装
 

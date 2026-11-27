@@ -319,11 +319,11 @@ final class TiebaMessageListViewController: UIViewController {
       TiebaNavigator.shared.navigate(.user(uid: item.fromUserId))
       return
     }
-    guard !item.threadId.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.explicit(threadId: item.threadId, postId: item.postId) else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
-    // postId 空 = 只进主帖（原 ?postId= 查询串的类型化等价）。
-    TiebaNavigator.shared.navigate(
-      .thread(id: item.threadId, postId: item.postId.isEmpty ? nil : item.postId)
-    )
+    TiebaNavigator.shared.navigate(target.route())
   }
 }

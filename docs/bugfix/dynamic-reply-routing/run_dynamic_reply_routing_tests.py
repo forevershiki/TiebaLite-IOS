@@ -1,0 +1,94 @@
+"""Check reply routing on Windows or run the offline Swift/Protobuf suite on macOS."""
+
+import argparse
+import json
+from pathlib import Path
+import runpy
+import shutil
+
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+NATIVE = ROOT / "Sources" / "TiebaNative"
+SCHEMA = NATIVE / "Proto" / "proto-descriptors.json"
+PREVIOUS = HERE.parent / "dynamic-feed-thread"
+
+
+def read(relative):
+    return (NATIVE / relative).read_text(encoding="utf-8")
+
+
+def check_sources():
+    messages = json.loads(SCHEMA.read_text(encoding="utf-8"))["nested"]["tieba"]["nested"]
+    thread = messages["ThreadInfo"]["fields"]
+    origin = messages["OriginThreadInfo"]["fields"]
+    assert {key: thread[key]["id"] for key in (
+        "id", "threadId", "firstPostId", "postId", "originThreadInfo", "isShareThread", "forumId",
+    )} == {
+        "id": 1, "threadId": 2, "firstPostId": 40, "postId": 52,
+        "originThreadInfo": 141, "isShareThread": 143, "forumId": 27,
+    }
+    assert thread["postId"]["protoName"] == "post_id"
+    assert [(key, origin[key]["id"], origin[key]["type"]) for key in ("tid", "fid", "pid")] == [
+        ("tid", 5, "string"), ("fid", 7, "int64"), ("pid", 25, "int64"),
+    ]
+    generated = read("Proto/Generated/OriginThreadInfo.pb.swift")
+    assert "var tid: String" in generated and "var pid: Int64" in generated
+    assert "fieldNumber: 25" in generated
+    print("PASS: descriptor, normalized aliases and generated nested ID fields")
+
+    resolver = read("Core/Routing/TiebaThreadCardTarget.swift")
+    assert "allowLegacyTopicID: Bool = false" in resolver
+    assert "originPID == identifiableReply" in resolver and "if isShare(row) { return quoted(row) }" in resolver
+    assert "row[\"title\"]" not in resolver
+    mapper = read("Core/Proto/TiebaViewModelMapper.swift")
+    assert '"pid": firstPositiveID(od["pid"])' in mapper and 'out["routingForumId"] = routingForumID' in mapper
+    assert 'if ids.count > 1 { return "" }' in mapper
+    explore = read("Features/Explore/TiebaExploreFeedViewController.swift")
+    assert 'return items[index]["threadInfo"] as? [String: Any]' in explore
+    assert "TiebaThreadCardTarget.unresolvedMessage" in explore
+    assert "allowLegacyTopicID: true" not in explore
+    assert "TiebaThreadCardTarget.explicit(threadId: item.threadId, postId: item.postId)" in read(
+        "Features/Messages/TiebaMessageListViewController.swift"
+    )
+    assert ".business(4" not in read("Core/Networking/TiebaThreadPageRequest.swift").split("var errorDescription")[0]
+    print("PASS: mixed-feed guard, reply/reference identity, FID conflict and code 4 policy")
+
+    diagnostics = read("Core/Routing/TiebaReplyRoutingDiagnostics.swift")
+    assert diagnostics.startswith("#if DEBUG\n") and diagnostics.rstrip().endswith("#endif")
+    assert "-TiebaDebugReplyRouting" in diagnostics
+    for prohibited in ("BDUSS", "STOKEN", "TBS", "Cookie", "Authorization", 'row["title"]', 'row["content"]'):
+        assert prohibited not in diagnostics
+    assert "thread.removeValue(forKey: TiebaReplyRoutingDiagnostics.presenceKey)" in read(
+        "Core/Networking/TiebaFeedAPI.swift"
+    )
+    assert "TiebaReplyRoutingDiagnostics.response(networkRequest, code: response.error.errorCode)" in read(
+        "Core/Networking/TiebaThreadAPI.swift"
+    )
+    print("PASS: opt-in Debug diagnostics and snapshot exclusion")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-sources", action="store_true")
+    args = parser.parse_args()
+    check_sources()
+    shared = runpy.run_path(str(PREVIOUS / "run_dynamic_feed_thread_tests.py"))
+    shared["check_sources"]()
+    if args.check_sources:
+        print("PASS: static checks only. Swift compiler and runtime were not invoked.")
+        return
+    swiftc = shutil.which("swiftc")
+    if not swiftc:
+        parser.error("macOS with Swift 6 is required to run the offline Swift fixtures")
+    support = (PREVIOUS / "DynamicFeedThreadTests.swift").read_text(encoding="utf-8").split("\n@main\n", 1)[0]
+    fixtures = (HERE / "DynamicReplyRoutingTests.swift").read_text(encoding="utf-8")
+    shared["run_swift"](
+        swiftc, shared["project_sources"](), fixtures=support + "\n" + fixtures,
+        extra_sources=("Core/Proto/TiebaSwiftProtoCodec.swift", "Core/Routing/TiebaReplyRoutingDiagnostics.swift"),
+        test_flags=("-DDEBUG",), test_args=(SCHEMA,),
+    )
+
+
+if __name__ == "__main__":
+    main()

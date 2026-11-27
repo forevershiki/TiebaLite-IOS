@@ -241,7 +241,14 @@ enum TiebaFeedAPI {
     // 新快照又会被判成过期。TiebaMonotonicTime 以本次开机时刻为锚，重启后仍连续，
     // 正是给这种"持久化下来的间隔"用的（同机同钟，历史值由 Date 写成也照常可比）。
     guard ts > 0, TiebaMonotonicTime.now * 1000 - ts <= snapshotMaxAge * 1000 else { return [] }
-    let visible = list.filter { ($0["threadInfo"] as? [String: Any])?["id"] is String }
+    let visible = list.compactMap { item -> [String: Any]? in
+      guard var thread = item["threadInfo"] as? [String: Any], thread["id"] is String else { return nil }
+      // Older snapshots retained display FID but lost evidence of disagreement.
+      if thread["routingForumId"] == nil { thread["routingForumId"] = "" }
+      var item = item
+      item["threadInfo"] = thread
+      return item
+    }
     // seed 行马上会被 ListKit publish；先异步发起首图 raw-data 预取。Nuke 会先查
     // DataCache 并与展示请求的无处理器依赖合并，已有数据不会重复下载。
     let imageURLs = firstImageURLs(in: visible, limit: 6)
@@ -259,10 +266,18 @@ enum TiebaFeedAPI {
   /// 0 行，只花后台线程）。
   static func saveSnapshot(_ items: [[String: Any]], segment: String) {
     guard !items.isEmpty else { return }
+    var cachedItems = Array(items.prefix(snapshotMaxItems))
+    #if DEBUG
+    for index in cachedItems.indices {
+      guard var thread = cachedItems[index]["threadInfo"] as? [String: Any] else { continue }
+      thread.removeValue(forKey: TiebaReplyRoutingDiagnostics.presenceKey)
+      cachedItems[index]["threadInfo"] = thread
+    }
+    #endif
     let payload: [String: Any] = [
       // 与 cachedSnapshot 的读数同源（TiebaMonotonicTime），见那里的注释。
       "ts": Int(TiebaMonotonicTime.now * 1000),
-      "items": Array(items.prefix(snapshotMaxItems)),
+      "items": cachedItems,
     ]
     guard let data = try? JSONSerialization.data(withJSONObject: payload),
       let text = String(data: data, encoding: .utf8)

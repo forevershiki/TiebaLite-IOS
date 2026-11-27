@@ -58,15 +58,15 @@ def check_sources():
 
     entries = {
         "Explore/TiebaExploreFeedViewController.swift": "TiebaThreadCardTarget.card(thread)",
-        "Explore/TiebaHotListViewController.swift": "TiebaThreadCardTarget.card(threads[index].row)",
+        "Explore/TiebaHotListViewController.swift": "TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true)",
         "Explore/TiebaTopicViewController.swift": "TiebaThreadCardTarget.card(threads[index])",
-        "Forum/TiebaForumViewController.swift": "TiebaThreadCardTarget.card(row)",
-        "Forum/TiebaForumSearchViewController.swift": ".thread(id: hit.threadId, forumId: forumId, forumName: forumName)",
+        "Forum/TiebaForumViewController.swift": "TiebaThreadCardTarget.card(row, allowLegacyTopicID: true)",
+        "Forum/TiebaForumSearchViewController.swift": "threadId: hit.threadId, postId: hit.isReply ? hit.postId : nil",
         "Search/TiebaSearchViewController.swift": "TiebaThreadCardTarget.card(hit.row)",
         "Profile/TiebaHistoryViewController.swift": "forumId: entry.forumId, forumName: entry.forumName",
         "Profile/TiebaUserProfileViewController.swift": "TiebaThreadCardTarget.card(row)",
         "Thread/TiebaThreadStoreViewController.swift": "target.route(fromFavorites: true)",
-        "Thread/TiebaSubpostsViewController.swift": ".thread(id: threadId, forumId: forumId, forumName: forumName)",
+        "Thread/TiebaSubpostsViewController.swift": "TiebaThreadCardTarget.explicit(threadId: threadId, forumId: forumId",
     }
     for path, snippet in entries.items():
         assert snippet in read("Features/" + path), path
@@ -101,11 +101,15 @@ def check_sources():
     print("PASS: shared formatting and measured/rendered/accessibility chip text")
 
 
-def run_swift(swiftc, source):
+def run_swift(swiftc, source, fixtures=None, extra_sources=(), test_flags=(), test_args=()):
     with tempfile.TemporaryDirectory(prefix="tieba-dynamic-thread-") as directory:
         stage = Path(directory)
         generated = stage / "Production.swift"
         generated.write_text(source, encoding="utf-8")
+        test_file = HERE / "DynamicFeedThreadTests.swift"
+        if fixtures is not None:
+            test_file = stage / "Tests.swift"
+            test_file.write_text(fixtures, encoding="utf-8")
 
         def swift(*args):
             subprocess.run(
@@ -141,10 +145,11 @@ def run_swift(swiftc, source):
         swift(
             "-I", stage, "-L", stage, "-lSwiftProtobuf", "-lTiebaNativeProto",
             "-Xlinker", "-rpath", "-Xlinker", stage,
-            *(NATIVE / name for name in sources),
-            generated, HERE / "DynamicFeedThreadTests.swift", "-o", fixture,
+            *test_flags,
+            *(NATIVE / name for name in (*sources, *extra_sources)),
+            generated, test_file, "-o", fixture,
         )
-        subprocess.run([str(fixture)], check=True, timeout=60)
+        subprocess.run([str(fixture), *map(str, test_args)], check=True, timeout=60)
 
 
 def main():

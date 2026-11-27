@@ -325,7 +325,10 @@ final class TiebaHotListViewController: UIViewController, TiebaTabReselectable {
 
   private func openThread(_ index: Int) {
     guard threads.indices.contains(index) else { return }
-    guard let target = TiebaThreadCardTarget.card(threads[index].row) else { return }
+    guard let target = TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true) else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
     TiebaNavigator.shared.navigate(target.route())
   }

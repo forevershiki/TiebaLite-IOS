@@ -1,7 +1,7 @@
 name: Build iOS Unsigned IPA
 
 # 一次编译出一个未签名真机 IPA（Artifact + 打 tag 时发布 Release）：
-#   TiebaLite-<版本>.ipa  最低 iOS 17；同一份二进制在 iOS 26+ 上运行时吃满液态玻璃等全部特性
+#   TiebaLite-<版本>-<SHA>.ipa  最低 iOS 17；同一份二进制在 iOS 26+ 上运行时吃满液态玻璃等全部特性
 #                        （26 专属能力全走 #available 分支，17/18 上自动退回该系统年代的材质）。
 # 未签名（ad-hoc 签名）真机 IPA，供 SideStore / AltStore 重签侧载。
 # 纯 Swift + Bazel：无 Node / npm / Metro / CocoaPods，也不需要任何 Apple 账号或 secret。
@@ -42,18 +42,16 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    name: Build
-    # macOS 26 自带 Xcode 26.x。如需固定版本可加：
-    #   - uses: maxim-lobanov/setup-xcode@v1
-    #     with:
-    #       xcode-version: '26.2.0'
+    name: Test and build
     runs-on: macos-26
     timeout-minutes: 120
-    # 并发键放在 job 级：同一 ref 的构建串行，不会互相取消。
+    defaults:
+      run:
+        shell: bash
     concurrency:
       group: ios-build-${{ github.ref }}
       cancel-in-progress: true
@@ -61,12 +59,54 @@ jobs:
       CONFIGURATION: ${{ inputs.configuration || 'Release' }}
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Show toolchain
+      - name: Set up test Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: A · Prepare and verify toolchain
+        id: toolchain
         run: |
-          xcodebuild -version
-          swift --version
+          diagnostics="$RUNNER_TEMP/tieba-ci"
+          mkdir -p "$diagnostics"
+          log="$diagnostics/toolchain.log"
+          trap 'cat "$log"' EXIT
+          sw_vers > "$log"
+          uname -m >> "$log"
+          python3 --version >> "$log"
+          xcodebuild -version >> "$log"
+          if ! grep -q '^Xcode 26\.' "$log"; then
+            echo "::error::The macos-26 runner must select Xcode 26.x"
+            exit 1
+          fi
+          sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          printf 'iPhoneOS SDK %s\n' "$sdk_version" >> "$log"
+          if [[ "$sdk_version" != 26 && "$sdk_version" != 26.* ]]; then
+            echo "::error::Expected an iPhoneOS 26.x SDK"
+            exit 1
+          fi
+          macos_sdk=$(xcrun --sdk macosx --show-sdk-version)
+          printf 'macOS SDK %s\n' "$macos_sdk" >> "$log"
+          swiftc_path=$(xcrun --find swiftc)
+          "$swiftc_path" --version >> "$log"
+          dirname "$swiftc_path" >> "$GITHUB_PATH"
+
+          if ! command -v bazelisk >/dev/null; then
+            brew install bazelisk
+          fi
+          expected_bazel=$(tr -d '\r' < .bazelversion)
+          actual_bazel=$(bazelisk --version)
+          printf '%s\n' "$actual_bazel" >> "$log"
+          if [[ "$expected_bazel" != 9.2.0 || "$actual_bazel" != "bazel $expected_bazel" ]]; then
+            echo "::error::Expected Bazel 9.2.0 from .bazelversion"
+            exit 1
+          fi
 
       # Bazel 磁盘/仓库缓存：命中后整包十几秒（冷编约 100 s）。
       - name: Cache Bazel
@@ -96,25 +136,51 @@ jobs:
       # （protoc-gen-swift 默认生成 internal，跨 module 不可见）。若有人用默认可见性重新生成，
       # 拆分会在编译期挂掉且报错点在生成物里、很难定位 —— 所以在构建前先拦一次，并给出正确姿势。
       - name: Verify protoc-generated visibility
+        id: protobuf_visibility
         run: |
           # 没拆 Proto target 的树上跳过：判据只对拆过的树成立。
           if ! grep -q 'name = "Proto"' Sources/TiebaNative/BUILD.bazel; then
             echo "skip: 本分支未拆 //Sources/TiebaNative:Proto，无需校验生成物可见性"
             exit 0
           fi
-          total=$(ls Sources/TiebaNative/Proto/Generated/*.pb.swift | wc -l | tr -d ' ')
-          missing=$(grep -L 'public ' Sources/TiebaNative/Proto/Generated/*.pb.swift | wc -l | tr -d ' ')
-          echo "protoc 产物: $total 个，其中不含任何 public 声明的: $missing 个"
-          if [ "$missing" != "0" ]; then
-            echo "::error::有 $missing 个 protoc 产物不含 public 声明。拆分（//Sources/TiebaNative:Proto）依赖它们跨 module 可见，请用 protoc-gen-swift --swift_opt=Visibility=Public 重新生成后再提交。"
-            grep -L 'public ' Sources/TiebaNative/Proto/Generated/*.pb.swift | head -5
+          generated=(Sources/TiebaNative/Proto/Generated/*.pb.swift)
+          if [[ ! -f "${generated[0]}" ]]; then
+            echo "::error::No SwiftProtobuf generated sources found"
             exit 1
           fi
+          missing=0
+          for file in "${generated[@]}"; do
+            if ! grep -q 'public ' "$file"; then
+              echo "::error file=$file::Regenerate with protoc-gen-swift --swift_opt=Visibility=Public"
+              missing=$((missing + 1))
+            fi
+          done
+          printf 'SwiftProtobuf generated files=%s missing public visibility=%s\n' "${#generated[@]}" "$missing"
+          [[ "$missing" == 0 ]]
 
-      - name: Build (bazel, ad-hoc signed device IPA)
+      - name: B · Python source regression checks
+        id: source_checks
         run: |
-          brew install bazelisk
-          bazel --version
+          python3 -u docs/bugfix/dynamic-feed-thread/run_dynamic_feed_thread_tests.py --check-sources
+          python3 -u docs/bugfix/deep-link/run_deep_link_tests.py --check-sources
+          python3 -u docs/bugfix/http-retry/run_retry_tests.py --check-sources
+          python3 -u docs/features/composer/run_composer_tests.py --check-sources --suite-only
+          python3 -u docs/features/private-message/run_private_message_tests.py --check-sources --suite-only
+          python3 -u docs/bugfix/dynamic-reply-routing/run_dynamic_reply_routing_tests.py --check-sources
+
+      - name: C · Swift offline regressions and Protobuf validation
+        id: swift_checks
+        run: |
+          python3 -u docs/bugfix/dynamic-reply-routing/run_dynamic_reply_routing_tests.py
+          python3 -u docs/bugfix/dynamic-feed-thread/run_dynamic_feed_thread_tests.py
+          python3 -u docs/bugfix/deep-link/run_deep_link_tests.py
+          python3 -u docs/bugfix/http-retry/run_retry_tests.py
+          python3 -u docs/features/composer/run_composer_tests.py --suite-only
+          python3 -u docs/features/private-message/run_private_message_tests.py --suite-only
+
+      - name: D · Build iOS App
+        id: app_build
+        run: |
           # ── 占位描述文件（原先的 Tools/make-unsigned-profile.sh，2026-10-07 内联到这里）──
           # rules_apple 对设备构建强制要求每个 bundle 都有 provisioning_profile 工件
           # （ios_rules.bzl 无条件挂 partial），且会解析它的 plist 取 entitlements；
@@ -158,36 +224,74 @@ jobs:
             done
           fi
           mode=$([ "$CONFIGURATION" = "Release" ] && echo release || echo debug)
-          # //:AppStripped = //:App 的 IPA 再剥一遍符号表（体积约 -12%，见 BUILD.bazel 该目标的注释）；
-          # dSYM 由 //:App 生成，剥离不改 UUID，崩溃符号化不受影响。
-          bazel build //:AppStripped --config=ci --config="$mode"
+          bazelisk build //:App --config=ci --config="$mode"
 
-      - name: Package IPA
+      - name: E · Package unsigned IPA
+        id: package
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
         run: |
-          # 文件名：填了 tag 就用 tag 作版本号（v2.1.1 → TiebaLite-v2.1.1.ipa），没填按 commit 命名。
-          tag="${{ inputs.tag_name || github.ref_name }}"
-          case "$tag" in
-            v*) base="TiebaLite-$tag" ;;
-            *)  base="TiebaLite-unsigned-$(echo "${GITHUB_SHA}" | cut -c1-7)" ;;
-          esac
-          echo "IPA_NAME=${base}.ipa" >> "$GITHUB_ENV"
+          mode=$([ "$CONFIGURATION" = "Release" ] && echo release || echo debug)
+          bazelisk build //:AppStripped --config=ci --config="$mode"
+          version=unsigned
+          if [[ -n "$RELEASE_TAG" ]]; then
+            version=$(printf '%s' "$RELEASE_TAG" | LC_ALL=C tr -c 'A-Za-z0-9._+-' '-')
+          fi
+          ipa_name="TiebaLite-${version}-${GITHUB_SHA}.ipa"
           mkdir -p build/Payload
-          unzip -q bazel-bin/AppStripped.ipa -d build
-          # 原先这里有一道 python 隐私消毒（等长替换产物内嵌的构建机绝对路径，RN/Hermes
-          # 时代留下：Hermes 字节码不受编译期 -ffile-prefix-map 约束）。2026-10-07 实测
-          # CI 产物与本地未消毒产物里 /Users/... 与 bazel 临时路径均为 **0 处**，Hermes 早已
-          # 不存在 ⇒ 这一步（及其脚本）删除；产物自检仍在下一步做最低系统版本核对。
-          ( cd build && zip -qry "$(basename "${base}.ipa")" Payload )
-          unzip -l "build/${base}.ipa" | head -20
-          # 产物自检：APP 的最低系统版本必须是 17.0（合一后只有一种 IPA）
-          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" build/Payload/*.app/Info.plist
+          unzip -oq bazel-bin/AppStripped.ipa -d build
+          minimum_os=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" build/Payload/*.app/Info.plist)
+          printf 'MinimumOSVersion=%s\n' "$minimum_os"
+          [[ "$minimum_os" == 17.0 ]]
+          ( cd build && zip -qry "$ipa_name" Payload )
+          unzip -tq "build/$ipa_name"
+          echo "IPA_NAME=$ipa_name" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      - name: F · Upload IPA artifact
+        id: upload_ipa
         uses: actions/upload-artifact@v4
         with:
-          name: ipa
+          name: ipa-${{ github.sha }}
           path: build/${{ env.IPA_NAME }}
           if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Record failure diagnostics
+        if: failure()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          PROTOBUF_OUTCOME: ${{ steps.protobuf_visibility.outcome }}
+          SOURCE_OUTCOME: ${{ steps.source_checks.outcome }}
+          SWIFT_OUTCOME: ${{ steps.swift_checks.outcome }}
+          BUILD_OUTCOME: ${{ steps.app_build.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload_ipa.outcome }}
+        run: |
+          diagnostics="$RUNNER_TEMP/tieba-ci"
+          mkdir -p "$diagnostics"
+          printf '%s\n' \
+            "commit=$GITHUB_SHA" \
+            "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            "configuration=$CONFIGURATION" \
+            "checkout=$CHECKOUT_OUTCOME" "python=$PYTHON_OUTCOME" \
+            "toolchain=$TOOLCHAIN_OUTCOME" "protobuf_visibility=$PROTOBUF_OUTCOME" \
+            "source_checks=$SOURCE_OUTCOME" \
+            "swift_checks=$SWIFT_OUTCOME" "app_build=$BUILD_OUTCOME" \
+            "package=$PACKAGE_OUTCOME" "upload_ipa=$UPLOAD_OUTCOME" > "$diagnostics/status.log"
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/tieba-ci/status.log
+            ${{ runner.temp }}/tieba-ci/toolchain.log
+          if-no-files-found: warn
+          retention-days: 14
 
   # 构建产物出来后发 Release，挂上那一个 IPA。
   # 只在"手动触发且填了 tag_name"或"push 了 v* tag"时执行。
@@ -197,12 +301,14 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.tag_name != '') ||
       startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download IPAs
         uses: actions/download-artifact@v4
         with:
+          name: ipa-${{ github.sha }}
           path: dist
-          merge-multiple: true
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2

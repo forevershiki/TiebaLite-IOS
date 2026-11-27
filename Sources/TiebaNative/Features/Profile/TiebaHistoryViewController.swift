@@ -470,9 +470,11 @@ final class TiebaHistoryViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func openThread(_ entry: TiebaHistoryEntry) {
-    guard let id = TiebaRoutePath.positiveID(entry.threadId) else { return }
+    guard let target = TiebaThreadCardTarget.explicit(
+      threadId: entry.threadId, forumId: entry.forumId, forumName: entry.forumName
+    ) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: String(id), forumId: entry.forumId, forumName: entry.forumName))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func openForum(_ name: String) {

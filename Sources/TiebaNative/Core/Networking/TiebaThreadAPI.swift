@@ -213,7 +213,7 @@ enum TiebaThreadAPI {
         seeLz: seeLz,
         sort: sort
       )
-      let result = try await decodePageData(data, threadId: threadId, page: page, anchor: anchor)
+      let result = try await decodePageData(data, threadId: threadId, page: page, anchor: anchor, networkRequest: request)
       try Task.checkCancellation()
       guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
       TiebaPageCache.shared.storeInBackground(
@@ -284,7 +284,7 @@ enum TiebaThreadAPI {
         sort: sort
       ) else { return }
       guard TiebaPageCache.isScopeCurrent(scope),
-            (try? await decodePageData(data, threadId: threadId, page: page, anchor: anchor)) != nil else { return }
+            (try? await decodePageData(data, threadId: threadId, page: page, anchor: anchor, networkRequest: request)) != nil else { return }
       TiebaPageCache.shared.store(
         scope: scope,
         payload: data,
@@ -305,6 +305,9 @@ enum TiebaThreadAPI {
       if let pid = parameters.postID { request.pid = pid }
       if let fid = parameters.forumID { request.forumID = fid }
       request.pn = parameters.pageNumber
+      #if DEBUG
+      TiebaReplyRoutingDiagnostics.request(parameters)
+      #endif
       // r = 排序档位（热门 2 / 正序 0 / 倒序 1），服务端自己在 pb_sort_info 里列的
       // 就是这三档（实测：热门档回的是按热度重排、不带楼层的列表）。
       request.r = Int32(sort.rawValue)
@@ -330,7 +333,8 @@ enum TiebaThreadAPI {
     _ data: Data,
     threadId: String,
     page: Int,
-    anchor: String?
+    anchor: String?,
+    networkRequest: TiebaThreadPageRequest? = nil
   ) async throws -> TiebaThreadPage {
     let started = DispatchTime.now().uptimeNanoseconds
     let result = try await Task.detached(priority: .userInitiated) {
@@ -343,6 +347,9 @@ enum TiebaThreadAPI {
         }
         throw TiebaThreadPageError.invalidProtobuf
       }
+      #if DEBUG
+      if let networkRequest { TiebaReplyRoutingDiagnostics.response(networkRequest, code: response.error.errorCode) }
+      #endif
       if response.hasError, response.error.errorCode != 0 {
         throw TiebaThreadPageError.business(Int(response.error.errorCode), response.error.errorMsg)
       }

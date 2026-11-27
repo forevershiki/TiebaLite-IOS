@@ -42,7 +42,7 @@ enum TiebaThreadPageError: LocalizedError, Equatable {
 
   var allowsUnanchoredLookup: Bool {
     switch self {
-    case .missingAnchor, .business(4, _), .business(1989002, _): return true
+    case .missingAnchor, .business(1989002, _): return true
     default: return false
     }
   }

@@ -832,7 +832,10 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func openThread(_ row: [String: Any]) {
-    guard let target = TiebaThreadCardTarget.card(row) else { return }
+    guard let target = TiebaThreadCardTarget.card(row, allowLegacyTopicID: true) else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
     TiebaNavigator.shared.navigate(target.route())
   }

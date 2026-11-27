@@ -405,7 +405,11 @@ final class TiebaTopicViewController: UIViewController, TiebaNativeScreen {
   // MARK: - 动作
 
   private func openThread(_ index: Int) {
-    guard threads.indices.contains(index), let target = TiebaThreadCardTarget.card(threads[index]) else { return }
+    guard threads.indices.contains(index) else { return }
+    guard let target = TiebaThreadCardTarget.card(threads[index]) else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
     TiebaNavigator.shared.navigate(target.route())
   }

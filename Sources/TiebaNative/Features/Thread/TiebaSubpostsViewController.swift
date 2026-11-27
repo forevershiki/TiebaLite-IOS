@@ -859,9 +859,9 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   }
 
   private func openThread() {
-    guard !threadId.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.explicit(threadId: threadId, forumId: forumId, forumName: forumName) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: threadId, forumId: forumId, forumName: forumName))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   // MARK: - 顶栏

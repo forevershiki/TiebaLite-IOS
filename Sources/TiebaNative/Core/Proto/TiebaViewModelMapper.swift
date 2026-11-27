@@ -285,27 +285,24 @@ public enum TiebaViewModelMapper {
       abstract = str(coalesce(abstractRaw, ""))
     }
 
-    let originRaw = coalesce(rd["originThreadInfo"], rd["origin_thread_info"])
+    let originRaw = originThreadInfo(rd)
     let mediaList = mapMediaList(rd)
 
     var out: [String: Any] = [:]
     out["id"] = firstPositiveID(rd["id"], rd["threadId"], rd["thread_id"], rd["tid"])
     // rd 已是 [String: Any]，不再走 isAdThread(raw) 的二次 bridge。
     out["isAd"] = isNullish(coalesce(rd["alaInfo"], rd["ala_info"])) == false
-    // ⚠️ **不能拿 id 兜 threadId**：回复类推荐卡的 id(1) 是**回复 pid**、threadId(2) 才是帖子本体
-    //（见下面 postId 的注释）。原来的 coalesce 里带了 rd["id"]，于是"回复卡没有 threadId 字段"时
-    // threadId 被填成 pid → 点卡导航按 pid 请求帖子 → 服务端回"帖子不存在"→ 前端显示
-    // "帖子已被删除"（用户实证）。宁可留空（导航侧会拒绝），也不能填成**另一个对象的 id**。
+    // 保留独立坐标。混合流中的 id(1) 只用于卡片身份，不能跨入主题字段。
     out["threadId"] = firstPositiveID(rd["threadId"], rd["thread_id"], rd["tid"])
     out["firstPostId"] = firstPositiveID(rd["firstPostId"], rd["first_post_id"])
-    // 被推荐的那条回复（"回复了xxx"类卡片）：ThreadInfo.post_id(52) = 回复 pid。
-    // 这类卡上 id(1) 不是帖子 id、threadId(2) 才是 —— 导航用 threadId + 这个 pid。
+    // post_id(52) 是显式楼层坐标。路由层还要与首楼、主题及嵌套坐标交叉检查。
     out["postId"] = firstPositiveID(rd["postId"], rd["post_id"])
     // 帖子/回复已被删除标记（ThreadInfo.is_deleted(181)）。推荐流会把原帖已删的
     // 卡片继续下发，点进去只剩「帖子已被删除」（issue #14）；feed 过滤要这两个标记。
     out["isDeleted"] = number(coalesce(rd["isDeleted"], rd["is_deleted"], 0)) != 0
     out["title"] = coalesce(rd["title"], "")!
     out["forumId"] = resolvedForum.id
+    out["routingForumId"] = routingForumID(rd, fallback: dict(forum))
     out["forumName"] = resolvedForum.name
     out["forumAvatar"] = resolvedForum.avatar
     out["authorId"] = authorId
@@ -346,26 +343,39 @@ public enum TiebaViewModelMapper {
       rd["hasAgree"], rd["has_agree"], 0
     ))
     out["isShareThread"] = strictOne(coalesce(rd["isShareThread"], rd["is_share_thread"], 0))
-    if truthy(originRaw) {
-      let od = dict(originRaw) ?? [:]
+    if let od = originRaw {
       let originForum = forumIdentity(od)
       out["originThreadInfo"] = [
         "title": coalesce(od["title"], "")!,
         "content": coalesce(od["content"], "")!,
         "forumName": originForum.name,
         "forumId": originForum.id,
+        "routingForumId": routingForumID(od),
         // 原帖 thread id（proto tid）：引用卡点击跳原帖用；服务端不回就空串。
         "threadId": firstPositiveID(od["tid"], od["threadId"], od["thread_id"]),
+        "pid": firstPositiveID(od["pid"]),
         // 被引用的原帖是否已删（OriginThreadInfo.is_deleted(9)）。
         "isDeleted": number(coalesce(od["isDeleted"], od["is_deleted"], 0)) != 0,
-        "media": mapMediaList(originRaw),
+        "media": mapMediaList(od),
       ] as [String: Any]
     }
+    #if DEBUG
+    if TiebaReplyRoutingDiagnostics.enabled {
+      out[TiebaReplyRoutingDiagnostics.presenceKey] = TiebaReplyRoutingDiagnostics.rawPresence(rd)
+    }
+    #endif
     return out
   }
 
   static func firstPositiveID(_ values: Any?...) -> String {
     values.lazy.compactMap { TiebaRoutePath.positiveID($0) }.first.map { String($0) } ?? ""
+  }
+
+  static func originThreadInfo(_ row: [String: Any]) -> [String: Any]? {
+    let aliases = [nonEmptyDict(row["originThreadInfo"]), nonEmptyDict(row["origin_thread_info"])].compactMap { $0 }
+    return aliases.first {
+      !firstPositiveID($0["tid"], $0["threadId"], $0["thread_id"]).isEmpty
+    } ?? aliases.first
   }
 
   static func forumIdentity(
@@ -383,6 +393,17 @@ public enum TiebaViewModelMapper {
       names.lazy.compactMap { $0 as? String }.first { !$0.isEmpty } ?? "",
       avatars.lazy.compactMap { $0 as? String }.first { !$0.isEmpty } ?? ""
     )
+  }
+
+  static func routingForumID(_ row: [String: Any], fallback: [String: Any]? = nil) -> String {
+    let nested = [dict(row["forumInfo"]), dict(row["forum_info"]), dict(row["forum"])].compactMap { $0 }
+    let rawIDs = [row["forumId"], row["forum_id"], row["fid"]]
+      + nested.flatMap { [$0["id"], $0["forumId"], $0["forum_id"], $0["fid"]] }
+    let ids = Set(rawIDs.compactMap { TiebaRoutePath.positiveID($0) })
+    if ids.count > 1 { return "" }
+    if let id = ids.first { return String(id) }
+    guard let fallback else { return "" }
+    return firstPositiveID(fallback["id"], fallback["forumId"], fallback["forum_id"], fallback["fid"])
   }
 
   // MARK: - feed.ts 纯投影（分页/吧头像回填/增量 Unix 状态留在 JS）

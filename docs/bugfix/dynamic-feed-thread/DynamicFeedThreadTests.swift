@@ -114,7 +114,7 @@ struct DynamicFeedThreadTests {
     let search: [String: Any] = ["threadId": "123", "forumId": "31", "forumName": "yy小说吧"]
     let history = TiebaRoute.thread(id: "123", forumId: "31", forumName: "yy小说吧")
     for row in [hot, forum, search] {
-      try expect(TiebaThreadCardTarget.card(row)?.route() == history, "topic identity across entry shapes")
+      try expect(TiebaThreadCardTarget.card(row, allowLegacyTopicID: true)?.route() == history, "topic identity across entry shapes")
     }
     let favorite = TiebaRoute.thread(id: "123", fromFavorites: true, forumId: "31", forumName: "yy小说吧")
     try expect(TiebaThreadCardTarget.card(search)?.route(fromFavorites: true) == favorite, "favorites preferences")
@@ -135,12 +135,13 @@ struct DynamicFeedThreadTests {
       ["id": "456", "post_id": "456", "origin_thread_info": origin, "forumInfo": nested]
     )
     let quoted = TiebaRoute.thread(id: "234", forumId: "32", forumName: "旧吧")
-    try expect(TiebaThreadCardTarget.card(orphan)?.route() == quoted, "origin keeps its own coordinates")
+    try expect(TiebaThreadCardTarget.card(orphan) == nil, "unrelated origin cannot establish current reply topic")
     try expect(TiebaThreadCardTarget.quoted(orphan)?.route() == quoted, "quoted tap")
     let share = TiebaViewModelMapper.mapProtoThread(
-      ["id": "123", "post_id": "456", "is_share_thread": 1, "origin_thread_info": origin, "forumInfo": nested]
+      ["id": "123", "threadId": "123", "post_id": "456", "is_share_thread": 1, "origin_thread_info": origin, "forumInfo": nested]
     )
-    try expect(TiebaThreadCardTarget.card(share)?.route() == history, "share tap keeps outer topic")
+    try expect(TiebaThreadCardTarget.card(share)?.route() == quoted, "share tap opens referenced topic")
+    try expect(TiebaThreadCardTarget.interaction(share)?.route() == history, "share interaction keeps outer topic")
     try expect(TiebaThreadCardTarget.quoted(share)?.route() == quoted, "share quote opens origin")
     try expect(TiebaThreadCardTarget.card(["id": "456", "postId": "456"]) == nil, "no reply ID as topic")
     try expect(TiebaThreadCardTarget.card(["id": "0", "threadId": ""]) == nil, "invalid topic")

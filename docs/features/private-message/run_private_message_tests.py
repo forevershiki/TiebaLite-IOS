@@ -154,6 +154,7 @@ def syntax_check():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-sources", action="store_true")
+    parser.add_argument("--suite-only", action="store_true", help="skip the separately scheduled composer suite")
     parser.add_argument("--swift-syntax", action="store_true")
     parser.add_argument("--verify-reference", type=Path, help="re-encode fixture payloads from a pinned aiotieba checkout")
     args = parser.parse_args()
@@ -168,7 +169,8 @@ def main():
         syntax_check()
     composer = ROOT / "docs/features/composer/run_composer_tests.py"
     if args.check_sources:
-        subprocess.run([sys.executable, str(composer), "--check-sources"], check=True, timeout=60)
+        if not args.suite_only:
+            subprocess.run([sys.executable, str(composer), "--check-sources"], check=True, timeout=60)
         return
 
     swiftc = shutil.which("swiftc")
@@ -182,7 +184,8 @@ def main():
             str(PROTOCOL), str(CACHE), str(TEST), "-o", str(executable),
         ], check=True, timeout=120)
         subprocess.run([str(executable), str(FIXTURES)], check=True, timeout=30)
-    subprocess.run([sys.executable, str(composer)], check=True, timeout=450)
+    if not args.suite_only:
+        subprocess.run([sys.executable, str(composer)], check=True, timeout=450)
 
 
 if __name__ == "__main__":

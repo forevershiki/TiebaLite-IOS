@@ -341,16 +341,18 @@ final class TiebaForumSearchViewController: UIViewController, TiebaNativeScreen 
   /// 「上一级回复」卡由楼中楼自身的 floorPost 提供（服务端随响应下发），
   /// 不再需要旧 JS 的 parentPostCache 快照。
   private func openPost(_ hit: TiebaSearchAPI.PostHit) {
-    guard !hit.threadId.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.explicit(
+      threadId: hit.threadId, postId: hit.isReply ? hit.postId : nil, forumId: forumId, forumName: forumName
+    ) else { return }
     TiebaSceneHaptics.fire("press")
     // 回复命中（type=2）→ 带 pid 直达楼中楼；主贴命中（type=1，pid 只是代表楼）
     // 必须进帖子页，否则整帖被套进楼中楼的"回复"外壳（用户实证）。
-    if hit.isReply, !hit.postId.isEmpty {
+    if let postId = target.postId {
       TiebaNavigator.shared.navigate(
         .subposts(
-          threadId: hit.threadId,
-          postId: hit.postId,
-          forumId: forumId,
+          threadId: target.threadId,
+          postId: postId,
+          forumId: target.forumId ?? "",
           floor: hit.floor > 0 ? hit.floor : nil,
           threadAuthorId: "",
           forumName: forumName,
@@ -359,7 +361,7 @@ final class TiebaForumSearchViewController: UIViewController, TiebaNativeScreen 
       )
       return
     }
-    TiebaNavigator.shared.navigate(.thread(id: hit.threadId, forumId: forumId, forumName: forumName))
+    TiebaNavigator.shared.navigate(target.route())
   }
 }
 

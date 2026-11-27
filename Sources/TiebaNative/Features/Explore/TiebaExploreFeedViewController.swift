@@ -586,13 +586,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       guard !hasImageMedia(thread) else { return }
       openThread(thread)
     case "quote":
-      // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quote = TiebaThreadCardTarget.quoted(thread) {
-        TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(quote.route())
-      } else {
-        openThread(thread)
-      }
+      openThread(thread, reference: true)
     default:
       openThread(thread)
     }
@@ -642,8 +636,15 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   // MARK: - 动作
 
-  private func openThread(_ thread: [String: Any]) {
-    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+  private func openThread(_ thread: [String: Any], reference: Bool = false) {
+    let target = reference ? TiebaThreadCardTarget.quoted(thread) : TiebaThreadCardTarget.card(thread)
+    #if DEBUG
+    TiebaReplyRoutingDiagnostics.card(thread, target: target)
+    #endif
+    guard let target else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
     TiebaNavigator.shared.navigate(target.route())
   }
@@ -672,7 +673,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   /// 点赞：乐观翻转 + 失败回滚（与帖子页/话题页同一竞态策略，镜像表防连点）。
   private func toggleLike(_ thread: [String: Any]) {
     let id = value(thread, "id")
-    guard !id.isEmpty, let target = TiebaThreadCardTarget.card(thread),
+    guard !id.isEmpty, let target = TiebaThreadCardTarget.interaction(thread),
       let index = items.firstIndex(where: {
       TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == id
     }) else { return }
@@ -784,7 +785,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   /// 链路：服务端收到该理由即不再推荐这个吧），成功后立刻收起本页该吧的所有行。
   private func blockForum(_ thread: [String: Any]) {
     // 回复推荐卡上 id 是回复 pid：提交给服务端的必须是与进帖/点赞同一个帖子本体 id。
-    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+    guard let target = TiebaThreadCardTarget.interaction(thread) else { return }
     let threadId = target.threadId
     let name = target.forumName ?? ""
     let forumId = target.forumId ?? ""
@@ -844,7 +845,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   private func submitDislike(_ thread: [String: Any], ids: String) {
     // 同 blockForum：不感兴趣要挂到帖子本体，回复卡的 pid 会让理由挂错对象。
-    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+    guard let target = TiebaThreadCardTarget.interaction(thread) else { return }
     let threadId = target.threadId
     let forumId = target.forumId ?? ""
     Task { @MainActor in
