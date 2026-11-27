@@ -2,7 +2,6 @@
 
 import argparse
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +10,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 NATIVE = ROOT / "Sources" / "TiebaNative"
+sys.path.insert(0, str(ROOT / "docs" / "ci"))
+from swift_host_toolchain import SwiftHost
 CORE = [
     NATIVE / "Core/Networking/TiebaComposerProtocol.swift",
     NATIVE / "Core/Networking/TiebaComposerSubmission.swift",
@@ -86,15 +87,12 @@ def main():
                 subprocess.run([sys.executable, str(suite), "--check-sources"], check=True, timeout=30)
         return
 
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("Swift 6 is required to run the offline executable. Use --check-sources for static checks.")
+    host = SwiftHost()
     with tempfile.TemporaryDirectory(prefix="tieba-composer-") as directory:
         executable = Path(directory) / "ComposerTests"
-        subprocess.run([
-            swiftc, "-swift-version", "6", "-parse-as-library",
+        host.compile(
             *(str(file) for file in [*CORE, TEST]), "-o", str(executable),
-        ], check=True, timeout=120)
+        )
         subprocess.run([str(executable)], check=True, timeout=30)
     if not args.suite_only:
         for suite in BASELINE:

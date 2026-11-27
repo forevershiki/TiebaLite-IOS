@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +13,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 NATIVE = ROOT / "Sources/TiebaNative"
+sys.path.insert(0, str(ROOT / "docs" / "ci"))
+from swift_host_toolchain import SwiftHost
 PROTOCOL = NATIVE / "Core/Networking/TiebaPrivateMessageProtocol.swift"
 CACHE = NATIVE / "Features/Messages/TiebaPrivateMessageCache.swift"
 TEST = HERE / "PrivateMessageTests.swift"
@@ -173,16 +174,14 @@ def main():
             subprocess.run([sys.executable, str(composer), "--check-sources"], check=True, timeout=60)
         return
 
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("Swift 6 and a macOS SDK are required. Use --check-sources on Windows.")
+    host = SwiftHost()
     with tempfile.TemporaryDirectory(prefix="tieba-private-message-") as directory:
         executable = Path(directory) / "PrivateMessageTests"
-        subprocess.run([
-            swiftc, "-swift-version", "6", "-parse-as-library", "-lsqlite3",
+        host.compile(
+            "-lsqlite3",
             str(NATIVE / "Core/TiebaMutex.swift"), str(NATIVE / "Core/TiebaSQLite.swift"),
             str(PROTOCOL), str(CACHE), str(TEST), "-o", str(executable),
-        ], check=True, timeout=120)
+        )
         subprocess.run([str(executable), str(FIXTURES)], check=True, timeout=30)
     if not args.suite_only:
         subprocess.run([sys.executable, str(composer)], check=True, timeout=450)

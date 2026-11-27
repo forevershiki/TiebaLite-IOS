@@ -3,14 +3,17 @@
 import argparse
 from pathlib import Path
 import re
-import shutil
 import subprocess
+import sys
 import tempfile
 
 
 HERE = Path(__file__).resolve().parent
-CORE = HERE.parents[2] / "Sources" / "TiebaNative" / "Core"
+ROOT = HERE.parents[2]
+CORE = ROOT / "Sources" / "TiebaNative" / "Core"
 NETWORKING = CORE / "Networking"
+sys.path.insert(0, str(ROOT / "docs" / "ci"))
+from swift_host_toolchain import SwiftHost
 
 
 def declarations(file, *signatures):
@@ -64,22 +67,19 @@ def main():
         print("PASS: selected production declarations extracted")
         return
 
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("Swift 6 and the macOS SDK are required to run the offline tests")
+    host = SwiftHost()
     with tempfile.TemporaryDirectory(prefix="tieba-http-retry-") as directory:
         projected = Path(directory) / "Production.swift"
         projected.write_text(source, encoding="utf-8")
         executable = Path(directory) / "HTTPRetryTests"
-        subprocess.run([
-            swiftc, "-swift-version", "6", "-parse-as-library",
+        host.compile(
             str(projected), str(HERE / "HTTPRetryTests.swift"),
             str(NETWORKING / "TiebaNativeClient.swift"),
             str(CORE / "Routing" / "TiebaRoutePath.swift"),
             str(CORE / "Proto" / "TiebaProtoCodec.swift"),
             str(CORE / "Proto" / "TiebaViewModelMapper.swift"),
             "-o", str(executable),
-        ], check=True, timeout=120)
+        )
         subprocess.run([str(executable)], check=True, timeout=45)
 
 

@@ -93,7 +93,7 @@ jobs:
           fi
           macos_sdk=$(xcrun --sdk macosx --show-sdk-version)
           printf 'macOS SDK %s\n' "$macos_sdk" >> "$log"
-          swiftc_path=$(xcrun --find swiftc)
+          swiftc_path=$(xcrun --sdk macosx --find swiftc)
           "$swiftc_path" --version >> "$log"
           dirname "$swiftc_path" >> "$GITHUB_PATH"
 
@@ -167,6 +167,13 @@ jobs:
           python3 -u docs/features/composer/run_composer_tests.py --check-sources --suite-only
           python3 -u docs/features/private-message/run_private_message_tests.py --check-sources --suite-only
           python3 -u docs/bugfix/dynamic-reply-routing/run_dynamic_reply_routing_tests.py --check-sources
+
+      - name: C0 · Check macOS Swift toolchain and run Foundation smoke test
+        id: swift_host
+        run: |
+          diagnostics="$RUNNER_TEMP/tieba-ci"
+          mkdir -p "$diagnostics"
+          python3 -u docs/ci/swift_host_toolchain.py 2>&1 | tee "$diagnostics/swift-host.log"
 
       - name: C · Swift offline regressions and Protobuf validation
         id: swift_checks
@@ -265,6 +272,7 @@ jobs:
           TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
           PROTOBUF_OUTCOME: ${{ steps.protobuf_visibility.outcome }}
           SOURCE_OUTCOME: ${{ steps.source_checks.outcome }}
+          SWIFT_HOST_OUTCOME: ${{ steps.swift_host.outcome }}
           SWIFT_OUTCOME: ${{ steps.swift_checks.outcome }}
           BUILD_OUTCOME: ${{ steps.app_build.outcome }}
           PACKAGE_OUTCOME: ${{ steps.package.outcome }}
@@ -278,7 +286,7 @@ jobs:
             "configuration=$CONFIGURATION" \
             "checkout=$CHECKOUT_OUTCOME" "python=$PYTHON_OUTCOME" \
             "toolchain=$TOOLCHAIN_OUTCOME" "protobuf_visibility=$PROTOBUF_OUTCOME" \
-            "source_checks=$SOURCE_OUTCOME" \
+            "source_checks=$SOURCE_OUTCOME" "swift_host=$SWIFT_HOST_OUTCOME" \
             "swift_checks=$SWIFT_OUTCOME" "app_build=$BUILD_OUTCOME" \
             "package=$PACKAGE_OUTCOME" "upload_ipa=$UPLOAD_OUTCOME" > "$diagnostics/status.log"
 
@@ -290,6 +298,7 @@ jobs:
           path: |
             ${{ runner.temp }}/tieba-ci/status.log
             ${{ runner.temp }}/tieba-ci/toolchain.log
+            ${{ runner.temp }}/tieba-ci/swift-host.log
           if-no-files-found: warn
           retention-days: 14
 

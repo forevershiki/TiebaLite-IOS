@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import runpy
-import shutil
 
 
 HERE = Path(__file__).resolve().parent
@@ -78,13 +77,10 @@ def main():
     if args.check_sources:
         print("PASS: static checks only. Swift compiler and runtime were not invoked.")
         return
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("macOS with Swift 6 is required to run the offline Swift fixtures")
     support = (PREVIOUS / "DynamicFeedThreadTests.swift").read_text(encoding="utf-8").split("\n@main\n", 1)[0]
     fixtures = (HERE / "DynamicReplyRoutingTests.swift").read_text(encoding="utf-8")
     shared["run_swift"](
-        swiftc, shared["project_sources"](), fixtures=support + "\n" + fixtures,
+        shared["project_sources"](), fixtures=support + "\n" + fixtures,
         extra_sources=("Core/Proto/TiebaSwiftProtoCodec.swift", "Core/Routing/TiebaReplyRoutingDiagnostics.swift"),
         test_flags=("-DDEBUG",), test_args=(SCHEMA,),
     )

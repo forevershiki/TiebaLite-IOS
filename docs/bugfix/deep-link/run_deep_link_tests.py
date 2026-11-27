@@ -3,13 +3,16 @@
 import argparse
 from pathlib import Path
 import re
-import shutil
 import subprocess
+import sys
 import tempfile
 
 
 HERE = Path(__file__).resolve().parent
-NATIVE = HERE.parents[2] / "Sources" / "TiebaNative"
+ROOT = HERE.parents[2]
+NATIVE = ROOT / "Sources" / "TiebaNative"
+sys.path.insert(0, str(ROOT / "docs" / "ci"))
+from swift_host_toolchain import SwiftHost
 
 
 def extract(relative_path, signature, closing):
@@ -68,21 +71,18 @@ def main():
         print("PASS: production external URL, body-link and share methods extracted")
         return
 
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("Swift 6 and Foundation are required to run the route tests")
+    host = SwiftHost()
     with tempfile.TemporaryDirectory(prefix="tieba-deep-link-") as directory:
         projected = Path(directory) / "Production.swift"
         projected.write_text(source, encoding="utf-8")
         executable = Path(directory) / "DeepLinkTests"
-        subprocess.run([
-            swiftc, "-swift-version", "6", "-parse-as-library",
+        host.compile(
             str(projected), str(HERE / "DeepLinkTests.swift"),
             str(NATIVE / "App" / "TiebaNavigationRoute.swift"),
             str(NATIVE / "Core" / "Routing" / "TiebaRoute.swift"),
             str(NATIVE / "Core" / "Routing" / "TiebaRoutePath.swift"),
             "-o", str(executable),
-        ], check=True, timeout=120)
+        )
         subprocess.run([str(executable)], check=True, timeout=30)
 
 

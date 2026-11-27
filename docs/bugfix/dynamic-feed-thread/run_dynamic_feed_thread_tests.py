@@ -5,14 +5,16 @@ import json
 from pathlib import Path
 import re
 import runpy
-import shutil
 import subprocess
+import sys
 import tempfile
 
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 NATIVE = ROOT / "Sources" / "TiebaNative"
+sys.path.insert(0, str(ROOT / "docs" / "ci"))
+from swift_host_toolchain import SwiftHost
 
 
 def read(relative):
@@ -101,7 +103,8 @@ def check_sources():
     print("PASS: shared formatting and measured/rendered/accessibility chip text")
 
 
-def run_swift(swiftc, source, fixtures=None, extra_sources=(), test_flags=(), test_args=()):
+def run_swift(source, fixtures=None, extra_sources=(), test_flags=(), test_args=()):
+    host = SwiftHost()
     with tempfile.TemporaryDirectory(prefix="tieba-dynamic-thread-") as directory:
         stage = Path(directory)
         generated = stage / "Production.swift"
@@ -111,19 +114,13 @@ def run_swift(swiftc, source, fixtures=None, extra_sources=(), test_flags=(), te
             test_file = stage / "Tests.swift"
             test_file.write_text(fixtures, encoding="utf-8")
 
-        def swift(*args):
-            subprocess.run(
-                [swiftc, "-swift-version", "6", "-parse-as-library", *map(str, args)],
-                check=True, timeout=1200,
-            )
-
         def library(name, files, *flags):
-            swift(
+            host.compile(
                 "-emit-library", "-emit-module", "-module-name", name,
                 "-whole-module-optimization",
                 "-emit-module-path", stage / (name + ".swiftmodule"),
                 "-o", stage / ("lib" + name + ".dylib"),
-                *flags, *sorted(files),
+                *flags, *sorted(files), timeout=1200,
             )
 
         vendor = ROOT / "Vendor" / "SwiftProtobuf" / "Sources" / "SwiftProtobuf"
@@ -142,12 +139,12 @@ def run_swift(swiftc, source, fixtures=None, extra_sources=(), test_flags=(), te
             "Core/Routing/TiebaRoutePath.swift",
             "Core/Routing/TiebaThreadCardTarget.swift",
         ]
-        swift(
+        host.compile(
             "-I", stage, "-L", stage, "-lSwiftProtobuf", "-lTiebaNativeProto",
             "-Xlinker", "-rpath", "-Xlinker", stage,
             *test_flags,
             *(NATIVE / name for name in (*sources, *extra_sources)),
-            generated, test_file, "-o", fixture,
+            generated, test_file, "-o", fixture, timeout=1200,
         )
         subprocess.run([str(fixture), *map(str, test_args)], check=True, timeout=60)
 
@@ -161,10 +158,7 @@ def main():
     if args.check_sources:
         print("PASS: production source extraction. Swift compiler and runtime were not invoked.")
         return
-    swiftc = shutil.which("swiftc")
-    if not swiftc:
-        parser.error("macOS with Swift 6 is required to compile and run the offline regression")
-    run_swift(swiftc, source)
+    run_swift(source)
 
 
 if __name__ == "__main__":
