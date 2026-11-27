@@ -139,9 +139,11 @@ struct DynamicReplyRoutingTests {
     let badNested = try feedRow(firstFloorAsTopic)
     try expect(TiebaThreadCardTarget.card(badNested) == nil, "Matching nested PID does not make first-floor PID a KZ")
     firstFloorAsTopic.postID = 0
-    try expect(TiebaThreadCardTarget.card(try feedRow(firstFloorAsTopic)) == nil, "An invalid nested KZ cannot fall back to a reference")
+    let invalidNestedKZ = try feedRow(firstFloorAsTopic)
+    try expect(TiebaThreadCardTarget.card(invalidNestedKZ) == nil, "An invalid nested KZ cannot fall back to a reference")
     firstFloorAsTopic.originThreadInfo.tid = "456"
-    try expect(TiebaThreadCardTarget.card(try feedRow(firstFloorAsTopic)) == nil, "Nested repetition of the card PID is not a reference KZ")
+    let repeatedNestedPID = try feedRow(firstFloorAsTopic)
+    try expect(TiebaThreadCardTarget.card(repeatedNestedPID) == nil, "Nested repetition of the card PID is not a reference KZ")
     firstFloorAsTopic.originThreadInfo.tid = "789"
     firstFloorAsTopic.postID = 456
     firstFloorAsTopic.threadID = 123
