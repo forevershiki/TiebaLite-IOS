@@ -345,7 +345,7 @@ private final class TiebaTopicForumChipView: UIControl {
     nameLabel.textColor = colors.text
     isAccessibilityElement = true
     accessibilityTraits = .button
-    accessibilityLabel = "\(forum.name)吧"
+    accessibilityLabel = TiebaForumFormat.displayName(forum.name)
 
     avatarView.image = nil
     avatarView.isHidden = forum.avatar == nil

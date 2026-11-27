@@ -563,10 +563,10 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       TiebaSceneHaptics.fire("press")
       TiebaNavigator.shared.navigate(.user(uid: uid))
     case "chip":
-      let forumName = value(thread, "forumName")
-      guard !forumName.isEmpty else { return }
+      let forum = TiebaViewModelMapper.forumIdentity(thread)
+      guard !forum.name.isEmpty else { return }
       TiebaSceneHaptics.fire("press")
-      TiebaNavigator.shared.navigate(.forum(name: forumName))
+      TiebaNavigator.shared.navigate(.forum(name: forum.name, forumId: forum.id))
     case "showMore":
       let id = value(thread, "id")
       guard !id.isEmpty, expandedIds.insert(id).inserted else { return }
@@ -587,9 +587,9 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       openThread(thread)
     case "quote":
       // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quoteId = TiebaFeedRowInteraction.quotedThreadId(in: thread) {
+      if let quote = TiebaThreadCardTarget.quoted(thread) {
         TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(.thread(id: quoteId))
+        TiebaNavigator.shared.navigate(quote.route())
       } else {
         openThread(thread)
       }
@@ -642,44 +642,17 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   // MARK: - 动作
 
-  /// 推荐卡的 **id 通道**解析：回复类卡片的 id(1) 是**回复 pid**、threadId(2) 才是帖子本体；
-  /// 普通卡片的 id 与 threadId 是同一个对象。点击与点赞共用这一处，避免两边各判一次
-  /// （判错一次就是"帖子已被删除"或赞错对象）。
-  ///
-  /// - Returns: threadId 为空 = 解析不出帖子本体。**绝不退回 id**：把 pid 当帖子 id 请求，
-  ///   服务端只会回"帖子不存在"，前端就显示"帖子已被删除"——正是用户报的那个 bug。
-  ///   replyPostId 非空 = 要定位到的那一楼（有它进帖直接落楼）。
-  private func resolvedThreadTarget(_ thread: [String: Any]) -> (threadId: String, replyPostId: String?) {
-    let postId = value(thread, "postId")
-    // 回复卡判据：被推荐回复的 pid 与首楼 pid 不同（普通帖卡的 post_id 就是首楼 pid）。
-    let isReplyCard = !postId.isEmpty && postId != value(thread, "firstPostId")
-    // ① 首选：threadId 字段（回复卡上它才是帖子本体）。带 pid 锚点 → 进帖直接落到那一楼。
-    let threadId = value(thread, "threadId")
-    if !threadId.isEmpty { return (threadId, isReplyCard ? postId : nil) }
-    if isReplyCard {
-      // ② 次选：被回复的主题帖（mapper 的 originThreadInfo.threadId，"回复：xxx" 的 xxx）。
-      //    能点开就行；**不带 pid 锚点**——无法确认被推荐的那条回复就在这张帖里
-      //    （origin 可能是"引用"的那张帖），带错 pid 只会让帖子页白找一趟。
-      let origin = thread["originThreadInfo"] as? [String: Any]
-      let originThreadId = TiebaSimpleRowParser.string(origin?["threadId"]) ?? ""
-      return (originThreadId, nil)
-    }
-    // ③ 普通卡：id 与 threadId 是同一个对象，允许用 id。
-    return (value(thread, "id"), nil)
-  }
-
   private func openThread(_ thread: [String: Any]) {
-    let target = resolvedThreadTarget(thread)
-    guard !target.threadId.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(thread) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: target.threadId, postId: target.replyPostId))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func shareThread(_ thread: [String: Any]) {
     // 帖子本体 id 必须走与导航/点赞**同一个**解析：回复推荐卡的 id 是回复 pid，
     // 拿它拼 /p/<pid> 只会分享出一个打不开的链接（分享按钮此前就是这条路径）。
-    let id = resolvedThreadTarget(thread).threadId
-    guard !id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+    let id = target.threadId
     TiebaSceneHaptics.fire("press")
     let url = "https://tieba.baidu.com/p/\(id)"
     let title = value(thread, "title")
@@ -699,7 +672,8 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   /// 点赞：乐观翻转 + 失败回滚（与帖子页/话题页同一竞态策略，镜像表防连点）。
   private func toggleLike(_ thread: [String: Any]) {
     let id = value(thread, "id")
-    guard !id.isEmpty, let index = items.firstIndex(where: {
+    guard !id.isEmpty, let target = TiebaThreadCardTarget.card(thread),
+      let index = items.firstIndex(where: {
       TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == id
     }) else { return }
     guard isLoggedIn else {
@@ -713,9 +687,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
     applyLike(index, next)
 
     // 与点击同一处解析：回复卡上 id 是 pid，不能当 threadId 发出去（否则赞错对象/请求失败）。
-    let target = resolvedThreadTarget(thread)
     let knownFirstPostId = value(thread, "firstPostId")
-    guard !target.threadId.isEmpty else { return }
     Task { @MainActor in
       // 首楼 pid：帖级点赞（obj_type=3）的 post_id 必须是首楼 pid，不能拿帖子 id 顶上
       //（服务端回"楼层不存在"）——issue #13：分享按钮右侧红心 100% 失败即此。
@@ -812,10 +784,10 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   /// 链路：服务端收到该理由即不再推荐这个吧），成功后立刻收起本页该吧的所有行。
   private func blockForum(_ thread: [String: Any]) {
     // 回复推荐卡上 id 是回复 pid：提交给服务端的必须是与进帖/点赞同一个帖子本体 id。
-    let threadId = resolvedThreadTarget(thread).threadId
-    guard !threadId.isEmpty else { return }
-    let name = TiebaFeedRowFallback.forumName(thread)
-    let forumId = value(thread, "forumId")
+    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+    let threadId = target.threadId
+    let name = target.forumName ?? ""
+    let forumId = target.forumId ?? ""
     Task { @MainActor in
       do {
         try await TiebaFeedAPI.submitDislike(
@@ -824,7 +796,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
           forumId: forumId
         )
         TiebaSceneHaptics.fire("action-success")
-        pill.showResult(success: true, text: name.isEmpty ? "已屏蔽这个吧" : "已屏蔽 \(name)吧")
+        pill.showResult(success: true, text: name.isEmpty ? "已屏蔽这个吧" : "已屏蔽 \(TiebaForumFormat.displayName(name))")
         removeForumRows(name: name, threadId: threadId)
       } catch {
         TiebaSceneHaptics.fire("action-fail")
@@ -872,9 +844,9 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   private func submitDislike(_ thread: [String: Any], ids: String) {
     // 同 blockForum：不感兴趣要挂到帖子本体，回复卡的 pid 会让理由挂错对象。
-    let threadId = resolvedThreadTarget(thread).threadId
-    guard !threadId.isEmpty else { return }
-    let forumId = value(thread, "forumId")
+    guard let target = TiebaThreadCardTarget.card(thread) else { return }
+    let threadId = target.threadId
+    let forumId = target.forumId ?? ""
     Task { @MainActor in
       do {
         try await TiebaFeedAPI.submitDislike(threadId: threadId, dislikeIds: ids, forumId: forumId)

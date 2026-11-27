@@ -237,7 +237,9 @@ public enum TiebaRouteTable {
         id: params["id"] ?? "",
         postId: params["postId"].flatMap { $0.isEmpty ? nil : $0 },
         seeLz: params["seeLz"] == "1",
-        fromFavorites: params["fromFavorites"] == "1"
+        fromFavorites: params["fromFavorites"] == "1",
+        forumId: params["forumId"].flatMap { $0.isEmpty ? nil : $0 },
+        forumName: params["forumName"].flatMap { $0.isEmpty ? nil : $0 }
       )
     case "thread/[id]/subposts":
       return .subposts(

@@ -435,7 +435,7 @@ extension TiebaFeedRowView {
   private func configureChip(with model: TiebaFeedRowModel) {
     guard model.showsForumChip else { return }
     chipView.isHidden = false
-    chipLabel.text = "\(model.forumName)吧"
+    chipLabel.text = model.forumChipText
     chipLabel.font = model.geometry.fonts.chipText
     chipLabel.textColor = palette.onChip
     chipLabel.isHidden = false

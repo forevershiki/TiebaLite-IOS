@@ -9,10 +9,18 @@ import UIKit
 
 final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeScreen {
   var screenTitle: String? { nil }
-  var screenRightBarItems: [UIBarButtonItem]? { forumBarItems() }
+  var screenRightBarItems: [UIBarButtonItem]? {
+    var items = forumBarItems() ?? []
+    if TiebaComposer.enabled, composerForum != nil {
+      items.insert(TiebaComposer.barItem("回复主题") { [weak self] in self?.composeReply(to: nil) }, at: 0)
+    }
+    return items.isEmpty ? nil : items
+  }
 
   private let threadId: String
   private let postId: String?
+  private let routeForumID: String?
+  private let routeForumName: String?
   private let fromFavorites: Bool
   let knownSnapshot: TiebaThreadSnapshot?
   private var seeLz: Bool
@@ -36,6 +44,9 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
   private var totalPages = 0
   var recordedVisit = false
   private var moreSignalToken: UUID?
+  private nonisolated(unsafe) var composerToken: NSObjectProtocol?
+  private var changedFloor: (account: String, id: String)?
+  private var pendingPostFocus: String?
   /// 长帖保留上限（原 MAX_POSTS）：头楼保留，其余丢弃最早追加的尾部之外的头。
   private static let maxPosts = 400
   /// 上一轮 publish 的模型 + 行指纹（键 = post id）：行内容未变的行直接复用
@@ -60,11 +71,17 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
 
   /// 类型化入口：参数由 TiebaNativeRouteTable 从 TiebaRoute.thread 解好，
   /// 页面不再自己从字符串读回。
-  init(threadId: String, postId: String?, seeLz: Bool, fromFavorites: Bool) {
-    self.threadId = threadId
+  init(
+    threadId: String, postId: String?, seeLz: Bool, fromFavorites: Bool,
+    forumId: String? = nil, forumName: String? = nil
+  ) {
+    let canonicalThreadID = TiebaRoutePath.positiveID(threadId).map { String($0) } ?? threadId
+    self.threadId = canonicalThreadID
     // 快照只在首帧消费一次（一次性交付）：未命中/深链进来都返回 nil。
-    self.knownSnapshot = TiebaThreadSnapshots.consume(id: threadId)
-    self.postId = postId
+    self.knownSnapshot = TiebaThreadSnapshots.consume(id: canonicalThreadID)
+    self.postId = TiebaRoutePath.positiveID(postId).map { String($0) }
+    self.routeForumID = forumId
+    self.routeForumName = forumName
     self.fromFavorites = fromFavorites
     let collectSeeLz = TiebaPreferenceSnapshot.bool("collectSeeLz", default: true)
     let collectDescSort = TiebaPreferenceSnapshot.bool("collectDescSort", default: false)
@@ -81,10 +98,21 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
     super.init(nibName: nil, bundle: nil)
   }
 
+  var canonicalForumName: String {
+    [thread?.forumName, routeForumName, knownSnapshot?.forumName]
+      .compactMap { $0 }.first { !$0.isEmpty } ?? ""
+  }
+
+  var knownForumID: String? {
+    (TiebaRoutePath.positiveID(thread?.forumId) ?? TiebaRoutePath.positiveID(routeForumID))
+      .map { String($0) }
+  }
+
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   deinit {
+    if let composerToken { NotificationCenter.default.removeObserver(composerToken) }
     if let moreSignalToken {
       Task { @MainActor in TiebaThreadMoreSignal.shared.remove(moreSignalToken) }
     }
@@ -134,6 +162,18 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       // sheet 在自身 viewDidDisappear（收起转场结束）后才会发动作，这里直接执行。
       self.handleMoreAction(action)
     }
+    composerToken = NotificationCenter.default.addObserver(
+      forName: TiebaComposer.floorDidReceiveReply, object: nil, queue: .main
+    ) { [weak self] note in
+      let id = note.userInfo?["thread"] as? String
+      let parent = note.userInfo?["parent"] as? String
+      let account = note.userInfo?["account"] as? String
+      MainActor.assumeIsolated {
+        guard let self, id == self.threadId, let parent, let account, account == TiebaSession.activeUid else { return }
+        self.changedFloor = (account, parent)
+        if self.hasAppeared { self.refreshChangedFloor() }
+      }
+    }
     showShortcut = TiebaPreferenceSnapshot.bool("showShortcutInThread", default: true)
     floatingBar.isHidden = !showShortcut
     reload()
@@ -142,6 +182,8 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     hasAppeared = true
+    (parent as? TiebaRouteHostViewController)?.syncNativeScreenChrome()
+    refreshChangedFloor()
     // Hero 返回/首次落位完成后，浮条再做 10pt 的短浮入；它只动 chrome，
     // 不抢主贴卡目标几何，也不会与导航转场同时抢第一帧。
     floatingBar.playEntranceIfNeeded()
@@ -201,9 +243,9 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       list.endRefreshing()
       return
     }
-    guard !threadId.isEmpty else {
+    guard TiebaRoutePath.positiveID(threadId) != nil else {
       list.endRefreshing()
-      showState(.error("缺少帖子 ID"))
+      showState(.error(TiebaThreadPageError.invalidThreadID.localizedDescription))
       return
     }
     isLoading = true
@@ -224,11 +266,15 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
           postId: self.postId,
           seeLz: self.seeLz,
           sort: self.sort,
+          forumId: self.knownForumID,
           // 首次进入 / 返回本页：先拿缓存，命中即出内容（SWR 再后台补新）。
           // 只有下拉刷新才绕过缓存。
           preferCache: !self.isUserRefresh
         )
-        self.apply(page, replacing: true, generation: generation)
+        guard generation == self.loadGeneration else { return }
+        let focus = self.postId.flatMap { id in page.posts.contains { $0.id == id } ? id : nil }
+        self.pendingPostFocus = focus
+        self.apply(page, replacing: true, generation: generation, locatingReply: focus != nil)
         if generation == self.loadGeneration, self.isUserRefresh {
           TiebaSceneHaptics.fire("toggle")
         }
@@ -237,7 +283,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         if self.posts.isEmpty {
           self.showState(.error(error.localizedDescription))
         } else {
-          self.pill.showResult(success: false, text: "加载失败")
+          self.pill.showResult(success: false, text: error.localizedDescription)
         }
       }
     }
@@ -245,7 +291,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
 
   /// 只看楼主 / 排序：只重取回复（主贴卡与工具栏整块不动，也不出现骨架）。
   /// 与 reload() 的区别只有两点：keepMain（不覆盖钉住的主贴）与不换页键。
-  private func reloadReplies() {
+  private func reloadReplies(anchor: String? = nil, composerRefresh: Bool = false, submitted: Bool = false) {
     // 点了就换：作废在飞的旧请求（代际自增）而不是被 isLoading 挡回去——挡回去的话
     // 药丸已显示新档位、列表还是上一次的内容（用户实证"残留切换前的内容"）。
     loadGeneration += 1
@@ -264,17 +310,25 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         let page = try await TiebaThreadAPI.page(
           threadId: self.threadId,
           page: 1,
-          postId: nil,
+          postId: anchor,
           seeLz: self.seeLz,
           sort: self.sort,
+          forumId: self.knownForumID,
           // 换排序/只看楼主是用户显式动作，他要的是按新档位重新拉一遍，不吃缓存。
-          preferCache: false
+          preferCache: false,
+          allowStaleOnError: !composerRefresh
         )
+        guard generation == self.loadGeneration else { return }
+        self.pendingPostFocus = submitted ? anchor : nil
         self.apply(page, replacing: true, generation: generation, keepMain: true)
-        if generation == self.loadGeneration { self.pill.hide() }
+        if submitted {
+          self.pill.showResult(success: true, text: "回复已发送")
+        } else {
+          self.pill.hide()
+        }
       } catch {
         guard generation == self.loadGeneration else { return }
-        self.pill.showResult(success: false, text: "加载失败")
+        self.pill.showResult(success: false, text: submitted ? "回复已发送，刷新失败" : error.localizedDescription)
       }
     }
   }
@@ -299,13 +353,14 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
           postId: nil,
           seeLz: self.seeLz,
           sort: self.sort,
+          forumId: self.knownForumID,
           preferCache: !self.isUserRefresh
         )
         guard generation == self.loadGeneration else { return }
         self.apply(page, replacing: false, generation: generation)
       } catch {
         guard generation == self.loadGeneration else { return }
-        self.pill.showResult(success: false, text: "加载失败")
+        self.pill.showResult(success: false, text: error.localizedDescription)
       }
     }
   }
@@ -325,7 +380,8 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
           page: page,
           postId: nil,
           seeLz: self.seeLz,
-          sort: self.sort
+          sort: self.sort,
+          forumId: self.knownForumID
         )
         guard generation == self.loadGeneration else { return }
         self.apply(result, replacing: true, generation: generation)
@@ -336,7 +392,7 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
         }
       } catch {
         guard generation == self.loadGeneration else { return }
-        self.pill.showResult(success: false, text: "跳转失败")
+        self.pill.showResult(success: false, text: error.localizedDescription)
       }
     }
   }
@@ -347,7 +403,8 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
     _ page: TiebaThreadPage,
     replacing: Bool,
     generation: Int,
-    keepMain: Bool = false
+    keepMain: Bool = false,
+    locatingReply: Bool = false
   ) {
     guard generation == loadGeneration else { return }
     var trimmed = false
@@ -356,7 +413,8 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       // 楼主楼恒按 floor == 1 定位；倒序/只看楼主时服务端可能整页都不回吐楼主楼，
       // 那就保留上一份钉住的主贴（换掉 = 主贴卡整块消失，用户实证"切排序主贴没了"）。
       if !keepMain,
-        let op = page.posts.first(where: { $0.floor == 1 }) ?? (postId == nil ? page.posts.first : nil)
+        let op = page.posts.first(where: { $0.floor == 1 })
+          ?? (!locatingReply && page.current == 1 ? page.posts.first : nil)
       {
         mainPost = op
       }
@@ -547,6 +605,12 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       // 主贴行（下标 0）的模型实例没换，重配时 apply 直接返回 —— 页码必须显式只刷工具栏，
       // 否则翻页后工具栏还停在上一个页码。
       self.list.refreshToolbar(index: 0)
+      if let focus = self.pendingPostFocus {
+        self.pendingPostFocus = nil
+        if let index = box.posts.firstIndex(where: { $0.id == focus }) {
+          self.list.scrollToPostRow(index)
+        }
+      }
       self.refreshMediaVisibility()
     }
   }
@@ -578,6 +642,71 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
     floatingBar.handleScroll(scrollView)
   }
 
+  private var composerForum: TiebaComposerForum? {
+    guard let thread, thread.id == threadId,
+      TiebaComposerTarget.isPositiveID(thread.forumId, signed: true), !thread.forumName.isEmpty
+    else { return nil }
+    return TiebaComposerForum(id: thread.forumId, name: thread.forumName)
+  }
+
+  private func composeReply(to post: TiebaThreadPost?) {
+    guard let forum = composerForum else { return }
+    let target: TiebaComposerTarget
+    if let post, post.floor != 1, post.id != thread?.firstPostId {
+      if post.floor <= 0 {
+        openSubPosts(post)
+        return
+      }
+      target = .floor(forum, threadID: threadId, parentID: post.id, floor: post.floor, recipient: post.composerRecipient)
+    } else {
+      target = .thread(forum, threadID: threadId, title: thread?.title ?? "")
+    }
+    TiebaComposer.present(from: presenterViewController, target: target, onCheck: { [weak self] in
+      guard let self else { return }
+      if target.parentID != nil, let post {
+        self.openSubPosts(post)
+      } else {
+        self.reloadReplies(composerRefresh: true)
+      }
+    }, onSuccess: { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .thread(let id, let postID) where id == self.threadId:
+        if postID != nil { self.seeLz = false }
+        self.reloadReplies(anchor: postID, composerRefresh: true, submitted: true)
+      case .floor(let id, let parentID, _) where id == self.threadId:
+        guard let post, post.id == parentID else { return }
+        self.changedFloor = (TiebaSession.activeUid, parentID)
+        self.pill.showResult(success: true, text: "楼中楼回复已发送")
+        self.openSubPosts(post)
+      default: break
+      }
+    })
+  }
+
+  private func refreshChangedFloor() {
+    guard let changedFloor else { return }
+    self.changedFloor = nil
+    guard changedFloor.account == TiebaSession.activeUid else { return }
+    let forumID = thread?.forumId ?? ""
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      guard let page = try? await TiebaThreadAPI.floor(
+        threadId: self.threadId, postId: changedFloor.id, forumId: forumID, page: 1
+      ), TiebaSession.activeUid == changedFloor.account,
+        let parentPost = page.floorPost, parentPost.id == changedFloor.id else { return }
+      self.patchPost(parentPost.id) {
+        $0.subPostNum = max(parentPost.subPostNum, page.subPosts.count)
+        $0.subPosts = page.subPosts.prefix(2).map {
+          TiebaThreadSubPost(id: $0.id, authorId: $0.authorId, authorName: $0.authorName,
+            authorNameShow: $0.authorNameShow, authorPortrait: $0.authorPortrait,
+            authorLevel: $0.authorLevel, content: $0.content, createTimeMs: $0.createTimeMs)
+        }
+      }
+      self.publish(fresh: false)
+    }
+  }
+
   override func handlePostEvent(_ index: Int, _ event: TiebaPostRowEvent) {
     guard rowPosts.indices.contains(index) else { return }
     let post = rowPosts[index]
@@ -607,6 +736,12 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       break
     case .subPosts:
       openSubPosts(post)
+    case .composeReply(let id):
+      guard let target = sourcePost(id: id) else { return }
+      composeReply(to: target)
+    case .openReplies(let id):
+      guard let target = sourcePost(id: id) else { return }
+      openSubPosts(target)
     case .image(let mediaIndex, let rect):
       openImageBrowser(post: post, index: mediaIndex, rect: rect)
     case .link(let url):
@@ -929,11 +1064,11 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
     let url = post.map { buildThreadUrl(postId: $0.id) } ?? buildThreadUrl(postId: nil)
     // 分享文案 = 标题 + 吧名 + 链接。吧名对收件人是有用信息（判断这是哪个吧的帖子），
     // 贴在标题下面一行，和吧页分享的「XX吧\n链接」同构。
-    let forumName = thread?.forumName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let forumName = TiebaForumFormat.displayName(canonicalForumName)
     let title = thread?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     var lines: [String] = []
     if title.isEmpty == false { lines.append(title) }
-    if forumName.isEmpty == false { lines.append("\(forumName)吧") }
+    if forumName.isEmpty == false { lines.append(forumName) }
     lines.append(url)
     TiebaShareSheet.present(text: lines.joined(separator: "\n"), from: presenterViewController)
   }
@@ -955,12 +1090,12 @@ final class TiebaThreadViewController: TiebaPostListPageController, TiebaNativeS
       .subposts(
         threadId: threadId,
         postId: post.id,
-        forumId: thread?.forumId ?? "",
+        forumId: knownForumID ?? "",
         // 热门档服务端不回楼层号（floor=0）：传 nil 让楼中楼页显示"第?楼"，
         // 首包后由 floorPost.floor 补——传 0 会顶栏固定成"第0楼回复"（用户实证）。
         floor: post.floor > 0 ? post.floor : nil,
         threadAuthorId: thread?.authorId ?? "",
-        forumName: thread?.forumName ?? "",
+        forumName: canonicalForumName,
         threadTitle: thread?.title ?? ""
       )
     )

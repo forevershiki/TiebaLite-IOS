@@ -264,7 +264,34 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
 
   private func barItems() -> [UIBarButtonItem]? {
     // UIKit 语义：下标 0 在最右——视觉从左到右是 [搜索][更多]（与旧页一致）。
-    [moreItem, searchItem]
+    var items = [moreItem, searchItem]
+    if TiebaComposer.enabled, composerForum != nil {
+      items.insert(TiebaComposer.barItem("发布主题") { [weak self] in self?.composeTopic() }, at: 0)
+    }
+    return items
+  }
+
+  private var composerForum: TiebaComposerForum? {
+    guard let card, TiebaComposerTarget.isPositiveID(card.forumId, signed: true) else { return nil }
+    return TiebaComposerForum(id: card.forumId, name: card.name.isEmpty ? forumName : card.name)
+  }
+
+  private func composeTopic() {
+    guard let forum = composerForum else { return }
+    TiebaComposer.present(from: presenterViewController, target: .topic(forum), onCheck: { [weak self] in
+      self?.refreshAfterSubmission()
+    }, onSuccess: { [weak self] destination in
+      guard let self, case .topic(let threadID) = destination else { return }
+      self.refreshAfterSubmission()
+      self.pill.showResult(success: true, text: "主题已发布")
+      TiebaNavigator.shared.navigate(.thread(id: threadID, forumId: forum.id, forumName: forum.name))
+    })
+  }
+
+  private func refreshAfterSubmission() {
+    cancelPageLoads()
+    isUserRefresh = true
+    load(tab: currentTab, page: 1, afterSubmission: true)
   }
 
   private func refreshMoreMenu() {
@@ -319,7 +346,7 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
     return (sort, tab == 2, timeType)
   }
 
-  private func load(tab: Int, page: Int) {
+  private func load(tab: Int, page: Int, afterSubmission: Bool = false) {
     guard !forumName.isEmpty else {
       showState(.error("缺少吧名"))
       return
@@ -350,7 +377,8 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
           page: page,
           sortType: semantics.sort,
           isGood: semantics.isGood,
-          classifyId: classifyId
+          classifyId: classifyId,
+          preferCache: !afterSubmission
         )
         guard let self, !Task.isCancelled, tab == self.currentTab, seq == self.loadSeq else { return }
         self.apply(result, tab: tab, page: page, timeType: semantics.timeType)
@@ -384,6 +412,7 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
       self.card = card
       if !card.tbs.isEmpty { TiebaBackgroundSnapshot.shared.tbs = card.tbs }
       if !result.classifies.isEmpty { classifies = result.classifies }
+      if TiebaComposer.enabled { (parent as? TiebaRouteHostViewController)?.syncNativeScreenChrome() }
     }
     if page == 1 {
       buckets[tab] = result.threads
@@ -707,9 +736,9 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
       openThread(row)
     case "quote":
       // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quoteId = TiebaFeedRowInteraction.quotedThreadId(in: row) {
+      if let quote = TiebaThreadCardTarget.quoted(row) {
         TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(.thread(id: quoteId))
+        TiebaNavigator.shared.navigate(quote.route())
       } else {
         openThread(row)
       }
@@ -803,10 +832,9 @@ final class TiebaForumViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func openThread(_ row: [String: Any]) {
-    let id = TiebaSimpleRowParser.string(row["id"]) ?? ""
-    guard !id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(row) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: id))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func shareThread(_ row: [String: Any]) {

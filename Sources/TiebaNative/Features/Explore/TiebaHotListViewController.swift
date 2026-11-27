@@ -325,18 +325,17 @@ final class TiebaHotListViewController: UIViewController, TiebaTabReselectable {
 
   private func openThread(_ index: Int) {
     guard threads.indices.contains(index) else { return }
-    let id = TiebaSimpleRowParser.string(threads[index].row["id"]) ?? ""
-    guard !id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(threads[index].row) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: id))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func openForum(_ index: Int) {
     guard threads.indices.contains(index) else { return }
-    let name = TiebaFeedRowFallback.resolve(threads[index].row).name
-    guard !name.isEmpty else { return }
+    let forum = TiebaViewModelMapper.forumIdentity(threads[index].row)
+    guard !forum.name.isEmpty else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.forum(name: name))
+    TiebaNavigator.shared.navigate(.forum(name: forum.name, forumId: forum.id))
   }
 
   private func openAuthor(_ index: Int) {
@@ -798,8 +797,9 @@ final class TiebaHotListCell: UICollectionViewCell {
     )
     // 吧名/吧头像兜底（同一份 TiebaFeedRowFallback：服务端热榜行同样可能缺名/缺图）。
     let forum = TiebaFeedRowFallback.resolve(row)
-    forumLabel.text = forum.name
-    forumChip.isHidden = forum.name.isEmpty
+    let forumTitle = TiebaForumFormat.displayName(forum.name)
+    forumLabel.text = forumTitle
+    forumChip.isHidden = forumTitle.isEmpty
     forumChip.backgroundColor = palette.placeholder
 
     replyLabel.text = TiebaForumFormat.count(Int(TiebaSimpleRowParser.double(row["replyNum"]) ?? 0))
@@ -810,7 +810,7 @@ final class TiebaHotListCell: UICollectionViewCell {
 
     accessibilityLabel = [
       "第\(rank)名", titleLabel.text ?? "", authorLabel.text ?? "",
-      forum.name.isEmpty ? "" : "\(forum.name)吧",
+      forumTitle,
       "回复\(replyLabel.text ?? "")", "赞\(agreeLabel.text ?? "")",
       "热度\(hotLabel.text ?? "")",
     ].filter { !$0.isEmpty }.joined(separator: "，")

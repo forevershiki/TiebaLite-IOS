@@ -132,13 +132,13 @@ final class TiebaForumRulesViewController: UIViewController, TiebaNativeScreen {
 
   private func buildSections(_ rules: TiebaForumRules) {
     let forumTitle = TiebaForumFormat.displayName(name, empty: "本吧")
-    let title = rules.title.isEmpty ? "\(forumTitle)吧规" : rules.title
+    let title = rules.title.isEmpty ? "\(forumTitle)规" : rules.title
     var head: [Row] = [.title(title)]
     if !rules.authorName.isEmpty || !rules.publishTime.isEmpty {
       head.append(
         .author(
           name: rules.authorName.isEmpty
-            ? "\(TiebaForumFormat.displayName(name, empty: "吧"))吧务团队"
+            ? "\(forumTitle)管理团队"
             : rules.authorName,
           portrait: rules.authorPortrait,
           time: rules.publishTime
@@ -160,7 +160,7 @@ final class TiebaForumRulesViewController: UIViewController, TiebaNativeScreen {
       Section(
         title: nil,
         number: 0,
-        rows: [.footer("以上内容来自\(forumTitle)吧务团队发布的管理规范")]
+        rows: [.footer("以上内容来自\(forumTitle)管理团队发布的管理规范")]
       )
     )
     sections = built

@@ -106,6 +106,7 @@ public nonisolated final class TiebaFeedRowModel: @unchecked Sendable {
   // ── 吧名徽章（TweetCard.tsx ForumChip）──
   public let showsForumChip: Bool
   public let forumName: String
+  let forumChipText: String
   public let forumAvatarURL: URL?
   public let forumChipInitial: String
 
@@ -426,7 +427,7 @@ public nonisolated final class TiebaFeedRowModel: @unchecked Sendable {
     let fallback = TiebaFeedRowFallback.resolve(raw)
     let forumName = fallback.name
     let showsForumChip = TiebaRowDict.bool(raw["showForumPill"]) == true && !forumName.isEmpty
-    let chipText = forumName.isEmpty ? "" : "\(forumName)吧"
+    let chipText = TiebaForumFormat.displayName(forumName)
     let chipTextWidth = TiebaRowText.singleLineWidth(chipText, font: fonts.chipText)
     let chipHeight = TiebaFeedRowLayout.chipPadding * 2 + max(TiebaFeedRowLayout.chipAvatarSize, lineHeights.chipText)
     let chipWidth = TiebaFeedRowLayout.chipPadding * 2
@@ -435,8 +436,7 @@ public nonisolated final class TiebaFeedRowModel: @unchecked Sendable {
       + chipTextWidth
       + 4 // chipText 的 marginRight: 4
     let forumAvatarURL = TiebaRowDict.avatarURL(fallback.avatar)
-    let forumChipInitial = forumName.replacingOccurrences(of: "吧$", with: "", options: .regularExpression)
-      .first.map(String.init) ?? "吧"
+    let forumChipInitial = forumName.first.map(String.init) ?? "吧"
 
     // ── 操作栏 ──
     let showsActions = TiebaRowDict.bool(raw["hideActions"]) != true
@@ -599,6 +599,7 @@ public nonisolated final class TiebaFeedRowModel: @unchecked Sendable {
     self.quoteThreadId = quoteThreadId
     self.showsForumChip = showsForumChip
     self.forumName = forumName
+    self.forumChipText = chipText
     self.forumAvatarURL = forumAvatarURL
     self.forumChipInitial = forumChipInitial
     self.showsActions = showsActions

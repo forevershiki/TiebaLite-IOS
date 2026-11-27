@@ -43,7 +43,7 @@ enum TiebaLinkOpener {
       return false
     }
     if let id = TiebaNavigator.webThreadID(in: components.percentEncodedPath) {
-      return TiebaNavigator.shared.navigate(.thread(id: id))
+      return TiebaNavigator.shared.navigate(TiebaNavigator.webThreadRoute(id: id, components: components))
     }
     // /f?kw=<吧名>
     if components.path == "/f",

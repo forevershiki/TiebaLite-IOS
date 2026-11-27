@@ -66,6 +66,16 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
 
     return [
       TiebaFormSection(
+        title: "实验性功能",
+        footer: "启用后可以在贴吧、帖子和楼中楼打开原生发言编辑器。",
+        rows: [
+          TiebaFormRow(
+            id: TiebaComposer.preference, kind: .toggle, title: "发帖与回复",
+            value: TiebaComposer.enabled ? "1" : "0"
+          )
+        ]
+      ),
+      TiebaFormSection(
         title: "通知",
         footer: "前台消息检查频率；低电量模式自动加倍，后台任务由系统统一调度。",
         rows: [
@@ -119,7 +129,7 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
             title: "清除全部数据",
             icon: "trash.slash",
             confirmTitle: "清除全部数据",
-            confirmMessage: "将清除登录状态、设置、历史、屏蔽数据与本地凭据，且不可恢复。",
+            confirmMessage: "将清除登录状态、设置、历史、屏蔽数据、本地凭据和发言草稿，且不可恢复。",
             confirmLabel: "确定清除"
           ),
         ]
@@ -144,6 +154,22 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
 
   override func handle(_ event: TiebaFormEvent) {
     switch event {
+    case .toggle(let id, let value) where id == TiebaComposer.preference:
+      if value {
+        form.setValue(id: id, value: "0")
+        let alert = UIAlertController(
+          title: "开启实验性发言？",
+          message: "此功能使用非官方客户端。贴吧可能要求额外验证、限制发言或限制账号。请按贴吧规则发言。",
+          preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "开启", style: .default) { [weak self] _ in
+          self?.write(id, bool: true)
+        })
+        present(alert, animated: true)
+      } else {
+        write(id, bool: false)
+      }
     case .pick(let id, let value):
       handlePick(id, value)
     case .confirm(let id):
@@ -269,6 +295,7 @@ final class TiebaMoreSettingsViewController: TiebaFormPageController {
       // account 名枚举，两行的先后顺序不再影响结果。
       TiebaSession.clearAllCredentials()
       TiebaBackgroundSnapshot.shared.clear()
+      try TiebaComposerDraftStore.live.removeAll()
       TiebaBackgroundSync.shared.cancelAll()
       TiebaNuke.clearCaches()
       TiebaNuke.removeLegacyImageCacheDirectory()

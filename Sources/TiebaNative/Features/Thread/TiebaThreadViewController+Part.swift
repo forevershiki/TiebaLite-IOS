@@ -6,9 +6,10 @@ extension TiebaThreadViewController {
   func forumBarItems() -> [UIBarButtonItem]? {
     // 数据没落地时用快照（点卡片进帖必写）：否则首包前右侧是空的，首包一到吧按钮
     // 才"突然"出现（用户实证）。深链无快照时仍等首包。
-    let forumName = thread?.forumName ?? knownSnapshot?.forumName ?? ""
+    let forumName = canonicalForumName
     guard !forumName.isEmpty else { return nil }
-    let label = "进入\(forumName)吧"
+    let displayName = TiebaForumFormat.displayName(forumName)
+    let label = "进入\(displayName)"
     let avatar = thread?.forumAvatar ?? knownSnapshot?.forumAvatarURL?.absoluteString ?? ""
     guard !avatar.isEmpty, let url = URL(string: avatar) else {
       // 缺吧头像：退化成通用头像符号（与原 headerRight 的 symbolItem 分支同语义）。
@@ -18,6 +19,10 @@ extension TiebaThreadViewController {
         target: nil,
         action: nil
       )
+      if TiebaPreferenceSnapshot.bool("threadShowForumName", default: true) {
+        item.image = nil
+        item.title = displayName
+      }
       item.accessibilityLabel = label
       item.accessibilityHint = "打开吧主页"
       item.primaryAction = UIAction { [weak self] _ in self?.openForum() }
@@ -39,10 +44,10 @@ extension TiebaThreadViewController {
   }
 
   private func openForum() {
-    let name = thread?.forumName ?? knownSnapshot?.forumName ?? ""
+    let name = canonicalForumName
     guard !name.isEmpty else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.forum(name: name, forumId: thread?.forumId ?? ""))
+    TiebaNavigator.shared.navigate(.forum(name: name, forumId: knownForumID ?? ""))
   }
 
   // MARK: - 浏览记录 / 收藏图片快照（原生 KV / SQLite，与 JS 同一份存储）
@@ -163,7 +168,7 @@ private final class TiebaThreadForumAvatarItem: UIView {
       setNeedsLayout()
       return
     }
-    nameLabel.text = trimmed.hasSuffix("吧") ? trimmed : trimmed + "吧"
+    nameLabel.text = TiebaForumFormat.displayName(trimmed)
     let textWidth = ceil(
       (nameLabel.text! as NSString).size(
         withAttributes: [.font: nameLabel.font as Any]

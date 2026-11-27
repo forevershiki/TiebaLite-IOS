@@ -77,6 +77,16 @@ private struct TiebaHttpTransportResponse: Sendable {
   let setCookies: [String]
 }
 
+private final class TiebaNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
+  }
+}
+
 private struct TiebaRequestKey: Hashable, Sendable {
   let method: String
   let url: String
@@ -159,6 +169,7 @@ final class TiebaHttpClient: @unchecked Sendable {
 
   private let waitingSession: URLSession
   private let immediateSession: URLSession
+  private let writeSession: URLSession
   private let waitsForConnectivityEnabled = TiebaMutex<Bool>(false)
   private let inFlight = TiebaMutex<[TiebaRequestKey: TiebaInFlightEntry]>([:])
 
@@ -170,6 +181,10 @@ final class TiebaHttpClient: @unchecked Sendable {
     let immediateConfiguration = Self.makeSessionConfiguration(waitsForConnectivity: false)
     waitingSession = URLSession(configuration: waitingConfiguration)
     immediateSession = URLSession(configuration: immediateConfiguration)
+    writeSession = URLSession(
+      configuration: Self.makeSessionConfiguration(waitsForConnectivity: false),
+      delegate: TiebaNoRedirectDelegate(), delegateQueue: nil
+    )
     waitingSession.sessionDescription = "TiebaNative API (waits for connectivity)"
     immediateSession.sessionDescription = "TiebaNative API (immediate)"
   }
@@ -257,6 +272,23 @@ final class TiebaHttpClient: @unchecked Sendable {
       throw TiebaClientError.httpStatus(response.statusCode)
     }
     return response.data
+  }
+
+  /// Interactive composer operations use an isolated single dispatch. Redirects may
+  /// replay a POST or move its credentials, so return the original response.
+  func sendComposerForm(
+    url: URL, headers: [String: String], body: String
+  ) async throws -> (status: Int, data: Data) {
+    guard url.scheme == "https", Self.isAllowedHost(url) else { throw TiebaHttpError.disallowedHost }
+    try Task.checkCancellation()
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+    request.httpMethod = "POST"
+    request.httpShouldHandleCookies = false
+    request.httpBody = Data(body.utf8)
+    request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+    for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+    let response = try await transport(request, session: writeSession)
+    return (response.statusCode, response.data)
   }
 
   // MARK: - 发送核心

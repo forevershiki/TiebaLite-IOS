@@ -243,7 +243,9 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
   }
 
   private func rowKey(_ row: [String: Any]) -> String {
-    "\(TiebaSimpleRowParser.string(row["threadId"]) ?? "")-\(TiebaSimpleRowParser.string(row["firstPostId"]) ?? "")"
+    let threadID = TiebaSimpleRowParser.string(row["threadId"]) ?? ""
+    let postID = TiebaViewModelMapper.firstPositiveID(row["postId"], row["firstPostId"])
+    return "\(threadID)-\(postID)"
   }
 
   /// 吧头像补齐：userPost 接口不下发吧头像（行内 `forumAvatar` 恒空），与浏览记录 /
@@ -299,11 +301,11 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
     var row: [String: Any] = [
       "kind": TiebaKindRowKind.simple.rawValue,
       "variant": "user",
-      "a11y": "\(forum.forumName)吧",
+      "a11y": TiebaForumFormat.displayName(forum.forumName),
       "avatar": forum.avatar,
       "avatarInitial": String(forum.forumName.prefix(2)),
       "avatarSize": 36,
-      "title": "\(forum.forumName)吧",
+      "title": TiebaForumFormat.displayName(forum.forumName),
       "titleSize": 14,
       "titleWeight": 600,
       "subtitle": forum.levelName,
@@ -554,9 +556,9 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
       }
     case "quote":
       // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-      if let quoteId = TiebaFeedRowInteraction.quotedThreadId(in: row) {
+      if let quote = TiebaThreadCardTarget.quoted(row) {
         TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(.thread(id: quoteId))
+        TiebaNavigator.shared.navigate(quote.route())
       } else {
         openThread(row)
       }
@@ -566,10 +568,9 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
   }
 
   private func openThread(_ row: [String: Any]) {
-    let id = TiebaSimpleRowParser.string(row["threadId"]) ?? ""
-    guard !id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(row) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: id))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func openForum(_ name: String) {
@@ -608,7 +609,7 @@ final class TiebaUserProfileViewController: UIViewController, TiebaNativeScreen 
     likeMirror[id] = next
     TiebaSceneHaptics.fire("like")
     applyLike(index, next)
-    let postId = TiebaSimpleRowParser.string(row["firstPostId"]) ?? ""
+    let postId = TiebaViewModelMapper.firstPositiveID(row["postId"], row["firstPostId"])
     Task { @MainActor in
       do {
         try await TiebaThreadActionAPI.setAgree(

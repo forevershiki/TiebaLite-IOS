@@ -359,7 +359,7 @@ final class TiebaForumSearchViewController: UIViewController, TiebaNativeScreen 
       )
       return
     }
-    TiebaNavigator.shared.navigate(.thread(id: hit.threadId))
+    TiebaNavigator.shared.navigate(.thread(id: hit.threadId, forumId: forumId, forumName: forumName))
   }
 }
 

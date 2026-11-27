@@ -5,8 +5,24 @@
 // 类型化路由落地后只剩两处消费者：深链拼查询串（TiebaNavigator.open(url:)）与
 // TiebaRoute.signature（连点去重）；本地跳转走类型化参数，不再经过字符串。
 import Foundation
+import CoreFoundation
 
 enum TiebaRoutePath {
+  static func positiveID(_ value: Any?) -> Int64? {
+    let text: String
+    if let string = value as? String {
+      text = string
+    } else if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+      text = number.stringValue
+    } else {
+      return nil
+    }
+    guard text.utf8.allSatisfy({ (48...57).contains($0) }), let id = Int64(text), id > 0 else {
+      return nil
+    }
+    return id
+  }
+
   private static let segmentAllowed = CharacterSet(
     charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
   )

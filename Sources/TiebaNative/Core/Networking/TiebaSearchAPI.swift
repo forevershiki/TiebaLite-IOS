@@ -80,11 +80,11 @@ enum TiebaSearchAPI {
     let list = (data["post_list"] as? [Any]) ?? (data["postList"] as? [Any]) ?? []
     let hits = list.compactMap { element -> ThreadHit? in
       guard let item = element as? [String: Any] else { return nil }
-      let id = TiebaSimpleRowParser.string(item["tid"] ?? item["id"]) ?? ""
+      let id = TiebaViewModelMapper.firstPositiveID(item["tid"], item["threadId"], item["thread_id"], item["id"])
       guard !id.isEmpty else { return nil }
       var hit = ThreadHit()
       hit.id = id
-      hit.row = threadRow(item)
+      hit.row = threadRow(item, threadId: id)
       return hit.row.isEmpty ? nil : hit
     }
     let hasMore = (TiebaSimpleRowParser.double(data["has_more"] ?? data["hasMore"]) ?? 0) == 1
@@ -168,14 +168,19 @@ enum TiebaSearchAPI {
     let data = (root["data"] as? [String: Any]) ?? root
     let list = array(data["post_list"] ?? data["postList"] ?? data) ?? []
     let hits = list.compactMap { item -> PostHit? in
-      let threadId = TiebaSimpleRowParser.string(item["tid"] ?? item["id"]) ?? ""
-      guard !threadId.isEmpty else { return nil }
       let postInfo = item["post_info"] as? [String: Any] ?? item["postInfo"] as? [String: Any]
+      let floor = Int(TiebaSimpleRowParser.double(item["floor"] ?? postInfo?["floor"]) ?? 0)
+      let postId = TiebaViewModelMapper.firstPositiveID(item["pid"], postInfo?["pid"])
+      let threadId = TiebaViewModelMapper.firstPositiveID(
+        item["tid"], item["threadId"], item["thread_id"],
+        floor == 1 || (filterType == 1 && floor <= 1) ? item["id"] : nil
+      )
+      guard !threadId.isEmpty else { return nil }
       var hit = PostHit()
       hit.threadId = threadId
-      hit.postId = TiebaSimpleRowParser.string(item["pid"] ?? postInfo?["pid"]) ?? ""
-      hit.floor = Int(TiebaSimpleRowParser.double(item["floor"] ?? postInfo?["floor"]) ?? 0)
-      hit.isReply = (TiebaSimpleRowParser.double(item["floor"] ?? postInfo?["floor"]) ?? 0) > 1
+      hit.postId = postId == threadId ? "" : postId
+      hit.floor = floor
+      hit.isReply = floor > 1
       hit.row = postRow(item)
       return hit
     }
@@ -187,7 +192,7 @@ enum TiebaSearchAPI {
   // MARK: - 行字典
 
   /// 贴结果 → 信息流行（原 SearchResultList.searchThreadToThreadInfo 的投影）。
-  private static func threadRow(_ item: [String: Any]) -> [String: Any] {
+  private static func threadRow(_ item: [String: Any], threadId: String) -> [String: Any] {
     let user = item["user"] as? [String: Any] ?? [:]
     let mainPost = item["main_post"] as? [String: Any] ?? item["mainPost"] as? [String: Any] ?? [:]
     let media = array(item["media"]) ?? array(mainPost["media"]) ?? []
@@ -195,27 +200,22 @@ enum TiebaSearchAPI {
     // 原 search.ts：forum_name ?? forumInfo.forum_name；头像 forum_info.avatar
     // ?? forumInfo.avatar（逐键兜底，不能整体取一个字典）。缺名会让左下角
     // 吧徽章整块不渲染（用户反馈）。
-    let forumInfoSnake = item["forum_info"] as? [String: Any]
-    let forumInfoCamel = item["forumInfo"] as? [String: Any]
-    let forumName = TiebaSimpleRowParser.string(
-      item["forum_name"] ?? item["forumName"]
-        ?? forumInfoCamel?["forum_name"] ?? forumInfoSnake?["forum_name"]
-        ?? forumInfoCamel?["name"] ?? forumInfoSnake?["name"]
-    ) ?? ""
-    var forumAvatar = TiebaSimpleRowParser.string(
-      forumInfoSnake?["avatar"] ?? forumInfoCamel?["avatar"]
-    ) ?? ""
+    let forum = TiebaViewModelMapper.forumIdentity(item)
+    let forumName = forum.name
+    var forumAvatar = forum.avatar
     if forumAvatar.isEmpty, !forumName.isEmpty,
-      let key = TiebaForumAvatarCache.key(forumId: "", forumName: forumName)
+      let key = TiebaForumAvatarCache.key(forumId: forum.id, forumName: forumName)
     {
       // 原 SearchResultList：服务端不带头像时按吧名读全站吧头像 KV 缓存
-      //（forum_avatars_v1，只读；搜索帖 forumId 恒空 → n:<吧名> 键）。
+      //（forum_avatars_v1，只读；缺 forumId 时使用 n:<规范吧名> 键）。
       forumAvatar = TiebaForumAvatarCache.shared.cached(key: key)
     }
     var thread: [String: Any] = [
-      "id": TiebaSimpleRowParser.string(item["tid"]) ?? "",
+      "id": threadId,
+      "threadId": threadId,
       "title": TiebaSimpleRowParser.string(item["title"]) ?? "",
       "forumName": forumName,
+      "forumId": forum.id,
       "forumAvatar": forumAvatar,
       // 屏蔽作者要用 uid：搜索结果的行内菜单里有「屏蔽」项，而 blockAuthor 读的正是 row["authorId"]
       // （Features/Search/TiebaSearchViewController.swift 的 guard !uid.isEmpty）。这里不补这个键，
@@ -299,7 +299,7 @@ enum TiebaSearchAPI {
       "avatar": TiebaSimpleRowParser.string(item["avatar"]) ?? "",
       "avatarInitial": String(name.prefix(1)),
       "avatarSize": 44,
-      "title": name.isEmpty ? "" : "\(name)吧",
+      "title": TiebaForumFormat.displayName(name),
       "titleSize": 16,
       "titleWeight": 600,
       "titleLineHeight": 21,

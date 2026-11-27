@@ -75,9 +75,10 @@ public enum TiebaNativeRouteTable {
       return TiebaForumMembersViewController(name: name, forumId: forumId)
     // 帖子详情（原 src/app/thread/[id].tsx）：pbPage 数据 + post 行列表（主贴卡 +
     // 回复工具栏 = 第 0 行）；浮动胶囊/更多 sheet/跳页/点赞收藏删除全原生。
-    case .thread(let id, let postId, let seeLz, let fromFavorites):
+    case .thread(let id, let postId, let seeLz, let fromFavorites, let forumId, let forumName):
       return TiebaThreadViewController(
-        threadId: id, postId: postId, seeLz: seeLz, fromFavorites: fromFavorites
+        threadId: id, postId: postId, seeLz: seeLz, fromFavorites: fromFavorites,
+        forumId: forumId, forumName: forumName
       )
     // 楼中楼（原 src/app/thread/[id]/subposts.tsx）：pbFloor 数据 + post 行列表
     //（父楼 = 第 0 行）；点赞/删除/查看器/分页全在原生。

@@ -84,12 +84,6 @@ enum TiebaFeedRowInteraction {
     return [title, body].filter { !$0.isEmpty }.joined(separator: "\n")
   }
 
-  /// 引用卡（转发帖）的原帖 thread id（mapper 从 proto tid 透传；缺失 = 老数据只展示）。
-  static func quotedThreadId(in row: [String: Any]) -> String? {
-    guard let origin = row["originThreadInfo"] as? [String: Any] else { return nil }
-    return TiebaRowDict.nonEmpty(origin["threadId"])
-  }
-
   /// 顶栏上下文标题 = 帖子标题；无标题回落摘要前 30 字（旧查看器同语义）。
   static func browserContextTitle(for row: TiebaFeedRowModel) -> String? {
     let title = row.titleText.trimmingCharacters(in: .whitespacesAndNewlines)

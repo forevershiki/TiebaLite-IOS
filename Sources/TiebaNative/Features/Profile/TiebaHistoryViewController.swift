@@ -283,7 +283,7 @@ final class TiebaHistoryViewController: UIViewController, TiebaNativeScreen {
       "forumAvatar": isForumRow ? "" : ((extra?["forumAvatar"] as? String) ?? cachedAvatar),
       "authorId": "",
       "authorName": isForumRow
-        ? (entry.forumName.isEmpty ? "未知" : entry.forumName)
+        ? TiebaForumFormat.displayName(entry.forumName, empty: "未知")
         : entry.authorName,
       "authorNameShow": "",
       "authorPortrait": isForumRow
@@ -470,10 +470,9 @@ final class TiebaHistoryViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func openThread(_ entry: TiebaHistoryEntry) {
-    let id = entry.threadId.isEmpty ? entry.id : entry.threadId
-    guard !id.isEmpty else { return }
+    guard let id = TiebaRoutePath.positiveID(entry.threadId) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: id))
+    TiebaNavigator.shared.navigate(.thread(id: String(id), forumId: entry.forumId, forumName: entry.forumName))
   }
 
   private func openForum(_ name: String) {

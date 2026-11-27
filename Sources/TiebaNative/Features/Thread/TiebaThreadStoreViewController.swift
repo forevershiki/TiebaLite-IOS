@@ -282,9 +282,9 @@ final class TiebaThreadStoreViewController: UIViewController, TiebaNativeScreen 
     case .rowTap(let index, let region, _):
       guard rows.indices.contains(index) else { return }
       // 转发引用卡 → 原帖；老数据缺 tid 或非引用区退回整卡进帖。
-      if region == "quote", let quoteId = TiebaFeedRowInteraction.quotedThreadId(in: rows[index]) {
+      if region == "quote", let quote = TiebaThreadCardTarget.quoted(rows[index]) {
         TiebaSceneHaptics.fire("press")
-        TiebaNavigator.shared.navigate(.thread(id: quoteId))
+        TiebaNavigator.shared.navigate(quote.route())
       } else {
         openThread(rows[index])
       }
@@ -321,10 +321,9 @@ final class TiebaThreadStoreViewController: UIViewController, TiebaNativeScreen 
   }
 
   private func openThread(_ row: [String: Any]) {
-    let id = TiebaSimpleRowParser.string(row["threadId"]) ?? ""
-    guard !id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(row) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: id, fromFavorites: true))
+    TiebaNavigator.shared.navigate(target.route(fromFavorites: true))
   }
 
   // MARK: - 取消收藏 / 撤销

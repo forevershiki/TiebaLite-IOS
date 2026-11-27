@@ -63,7 +63,8 @@ enum TiebaForumFeedAPI {
     page: Int,
     sortType: Int,
     isGood: Bool,
-    classifyId: String?
+    classifyId: String?,
+    preferCache: Bool = true
   ) async throws -> TiebaForumFeedPage {
     try Task.checkCancellation()
     let scope = cacheScope(
@@ -73,7 +74,7 @@ enum TiebaForumFeedAPI {
       isGood: isGood,
       classifyId: classifyId
     )
-    if TiebaPageCache.shared.takeInitialSeed(scope: scope),
+    if preferCache, TiebaPageCache.shared.takeInitialSeed(scope: scope),
        let entry = await TiebaPageCache.shared.load(
          scope: scope,
          maxStale: TiebaPageCacheKind.forum.maxStale
@@ -115,7 +116,7 @@ enum TiebaForumFeedAPI {
       return result
     } catch {
       try Task.checkCancellation()
-      if TiebaPageCache.isScopeCurrent(scope),
+      if preferCache, TiebaPageCache.isScopeCurrent(scope),
          TiebaPageCache.shouldFallbackToCache(error),
          let entry = await TiebaPageCache.shared.load(
            scope: scope,

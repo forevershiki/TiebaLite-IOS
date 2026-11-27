@@ -302,7 +302,7 @@ final class TiebaPostRowView: UIView {
     menuButton.frame = plan.menuFrame
     menuButton.setImage(TiebaSymbols.image("ellipsis", pointSize: 18, weight: .bold), for: .normal)
     menuButton.tintColor = TiebaAccessibleColors.icon
-    menuButton.accessibilityHint = "复制、分享或复制链接"
+    menuButton.accessibilityHint = TiebaComposer.enabled ? "回复、复制或分享" : "复制、分享或复制链接"
 
     let likeStateChanged = previousIsAgree != nil && previousIsAgree != model.post.isAgree
     let likeCountChanged = previousIsAgree != nil && previousLikeText != model.likeText
@@ -1270,6 +1270,18 @@ final class TiebaPostRowView: UIView {
   @objc private func handleMenu() {
     TiebaSceneHaptics.fire("sheet-present")
     let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    if TiebaComposer.enabled, let model, !model.post.id.isEmpty {
+      let id = model.post.id
+      let event = onEvent
+      sheet.addAction(UIAlertAction(title: "回复", style: .default) { [weak sheet] _ in
+        Self.afterMenuDismissal(sheet) { event?(.composeReply(postID: id)) }
+      })
+      if model.post.floor > 0, model.plan.role == .reply {
+        sheet.addAction(UIAlertAction(title: "打开楼中楼", style: .default) { [weak sheet] _ in
+          Self.afterMenuDismissal(sheet) { event?(.openReplies(postID: id)) }
+        })
+      }
+    }
     sheet.addAction(UIAlertAction(title: "复制内容", style: .default) { [weak self] _ in
       self?.onEvent?(.copyContent)
     })
@@ -1287,6 +1299,17 @@ final class TiebaPostRowView: UIView {
       popover.permittedArrowDirections = .up
     }
     presenter.present(sheet, animated: true)
+  }
+
+  private static func afterMenuDismissal(_ sheet: UIAlertController?, action: @escaping @MainActor () -> Void) {
+    DispatchQueue.main.async {
+      guard let sheet, sheet.presentingViewController != nil else { action(); return }
+      if let transition = sheet.transitionCoordinator,
+        transition.animate(alongsideTransition: nil, completion: { _ in
+          DispatchQueue.main.async { action() }
+        }) { return }
+      sheet.dismiss(animated: true) { action() }
+    }
   }
 
   // MARK: 工具

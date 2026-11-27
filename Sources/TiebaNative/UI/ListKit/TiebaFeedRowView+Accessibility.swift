@@ -72,7 +72,7 @@ extension TiebaFeedRowView {
     }
     if model.showsForumChip, let frame = plan.chipFrame,
       let element = makeTapAccessibilityElement(
-        label: "\(model.forumName)吧", frame: frame, traits: .button, hint: "进入吧")
+        label: model.forumChipText, frame: frame, traits: .button, hint: "进入吧")
     {
       elements.append(element)
     }

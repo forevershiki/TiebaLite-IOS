@@ -435,6 +435,13 @@ public final class TiebaKindListContentView: UIView {
     }
   }
 
+  func scrollToPostRow(_ index: Int) {
+    guard index >= 0, collectionView.numberOfSections > 0,
+      index < collectionView.numberOfItems(inSection: 0) else { return }
+    collectionView.layoutIfNeeded()
+    collectionView.scrollToItem(at: IndexPath(item: index, section: 0), at: .centeredVertically, animated: true)
+  }
+
   // MARK: 在显页保活 / 缺页自愈
 
   /// 保活当前页——仅当挂在窗口上（= 确实在显示）。首次布局前 setPage 很常见，

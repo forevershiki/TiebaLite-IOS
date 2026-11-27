@@ -616,12 +616,12 @@ public final class TiebaNavigator: NSObject, @unchecked Sendable {
     } else {
       guard scheme == "http" || scheme == "https", Self.isTiebaDomain(host) else { return false }
       if let id = Self.webThreadID(in: encodedPath) {
-        return navigate(.thread(id: id))
+        return navigate(Self.webThreadRoute(id: id, components: components))
       }
       guard path == ["", "f"] || path == ["", "mo", "q", "m"] else { return false }
       if let kz = encodedQuery("kz") {
         guard let id = kz.removingPercentEncoding, Self.isThreadID(id) else { return false }
-        return navigate(.thread(id: id))
+        return navigate(Self.webThreadRoute(id: id, components: components))
       }
       // 有值的 kw 优先，解码失败时也保留其优先级。
       encodedName = encodedQuery("kw") ?? encodedQuery("word")
@@ -638,13 +638,20 @@ public final class TiebaNavigator: NSObject, @unchecked Sendable {
     return firstThreadID(in: parts[1])
   }
 
+  static func webThreadRoute(id: String, components: URLComponents) -> TiebaRoute {
+    let query = components.queryItems ?? []
+    let pid = TiebaRoutePath.positiveID(query.first { $0.name == "pid" }?.value)
+    let seeLz = query.first { $0.name == "see_lz" }?.value == "1"
+    return .thread(id: id, postId: pid.map { String($0) }, seeLz: seeLz)
+  }
+
   private static func firstThreadID(in encodedPath: Substring) -> String? {
     guard let id = encodedPath.split(separator: "/").first?.removingPercentEncoding, isThreadID(id) else { return nil }
     return id
   }
 
   private static func isThreadID(_ id: String) -> Bool {
-    !id.isEmpty && id.utf8.allSatisfy { (48...57).contains($0) }
+    TiebaRoutePath.positiveID(id) != nil
   }
 
   private static func isTiebaDomain(_ host: String) -> Bool {

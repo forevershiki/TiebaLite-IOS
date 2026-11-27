@@ -593,9 +593,9 @@ final class TiebaSearchViewController: UIViewController, TiebaNativeScreen {
         publish(fresh: true)
       case "quote":
         // 转发引用卡 → 原帖；老数据缺 tid 退回整卡进帖。
-        if let quoteId = TiebaFeedRowInteraction.quotedThreadId(in: thread.row) {
+        if let quote = TiebaThreadCardTarget.quoted(thread.row) {
           TiebaSceneHaptics.fire("press")
-          TiebaNavigator.shared.navigate(.thread(id: quoteId))
+          TiebaNavigator.shared.navigate(quote.route())
         } else {
           openThread(thread)
         }
@@ -691,9 +691,9 @@ final class TiebaSearchViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func openThread(_ hit: TiebaSearchAPI.ThreadHit) {
-    guard !hit.id.isEmpty else { return }
+    guard let target = TiebaThreadCardTarget.card(hit.row) else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: hit.id))
+    TiebaNavigator.shared.navigate(target.route())
   }
 
   private func shareThread(_ hit: TiebaSearchAPI.ThreadHit) {

@@ -17,7 +17,10 @@ public enum TiebaRoute: Equatable, Hashable, Sendable {
   case profile
 
   // ── 帖子 / 楼中楼 / 帖子更多 ──
-  case thread(id: String, postId: String? = nil, seeLz: Bool = false, fromFavorites: Bool = false)
+  case thread(
+    id: String, postId: String? = nil, seeLz: Bool = false, fromFavorites: Bool = false,
+    forumId: String? = nil, forumName: String? = nil
+  )
   /// floor = nil 表示楼层未知（标题显示「第?楼」，首包到达后由 floorPost.floor 补）。
   case subposts(
     threadId: String,
@@ -114,11 +117,13 @@ public enum TiebaRoute: Equatable, Hashable, Sendable {
     case .notifications(let initialTab):
       return "/notifications" + Self.query([("initialTab", initialTab.map(String.init))])
     case .profile: return "/profile"
-    case .thread(let id, let postId, let seeLz, let fromFavorites):
+    case .thread(let id, let postId, let seeLz, let fromFavorites, let forumId, let forumName):
       return "/thread/\(Self.segment(id))" + Self.query([
         ("postId", postId),
         ("seeLz", seeLz ? "1" : nil),
         ("fromFavorites", fromFavorites ? "1" : nil),
+        ("forumId", forumId),
+        ("forumName", forumName),
       ])
     case .subposts(let threadId, let postId, let forumId, let floor, let threadAuthorId, let forumName, let threadTitle):
       return "/thread/\(Self.segment(threadId))/subposts" + Self.query([

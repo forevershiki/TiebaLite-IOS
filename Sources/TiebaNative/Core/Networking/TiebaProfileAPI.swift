@@ -250,7 +250,7 @@ enum TiebaProfileAPI {
     }
     guard response.hasData else { throw TiebaForumAPIError.invalidResponse }
     let list = response.data.postList
-    let rows = list.compactMap { postRow($0, uid: uid, detail: detail) }
+    let rows = list.compactMap { postRow($0, uid: uid, detail: detail, isThread: isThread) }
     return (rows, list.count >= postPageSize)
   }
 
@@ -260,16 +260,16 @@ enum TiebaProfileAPI {
   private static func postRow(
     _ raw: Tieba_PostInfoList,
     uid: String,
-    detail: TiebaProfileDetail?
+    detail: TiebaProfileDetail?,
+    isThread: Bool
   ) -> [String: Any]? {
-    let threadRaw = raw.threadID == 0 ? raw.postID : raw.threadID
-    guard threadRaw != 0 else { return nil }
+    let threadID = TiebaViewModelMapper.firstPositiveID(raw.threadID)
+    guard !threadID.isEmpty else { return nil }
     var row = TiebaViewModelMapper.mapProtoThread(mapperInput(raw))
     guard !row.isEmpty else { return nil }
-    // 行 key 与跳转都用 threadId（回复行共享同一主题帖；postId 只作首楼锚点）。
-    row["id"] = String(threadRaw)
-    row["threadId"] = String(threadRaw)
-    row["firstPostId"] = String(raw.postID)
+    row["id"] = threadID
+    row["threadId"] = threadID
+    row[isThread ? "firstPostId" : "postId"] = TiebaViewModelMapper.firstPositiveID(raw.postID)
     if TiebaSimpleRowParser.nonEmpty(row["title"]) == nil {
       row["title"] = raw.content.flatMap { $0.postContent }.map(\.text).joined()
     }
@@ -289,9 +289,8 @@ enum TiebaProfileAPI {
   /// 不再经过 proto3 JSON 往返（省一次序列化 + 键名反查）。
   private static func mapperInput(_ raw: Tieba_PostInfoList) -> [String: Any] {
     var input: [String: Any] = [
-      "id": String(raw.threadID != 0 ? raw.threadID : raw.postID),
+      "id": String(raw.threadID),
       "threadId": String(raw.threadID),
-      "firstPostId": String(raw.postID),
       "title": raw.title,
       "forumId": raw.forumID == 0 ? "" : String(raw.forumID),
       "forumName": raw.forumName,

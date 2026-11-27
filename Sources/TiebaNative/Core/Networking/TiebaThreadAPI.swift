@@ -143,6 +143,9 @@ struct TiebaThreadPage: Sendable {
 struct TiebaThreadFloorPage: Sendable {
   var floorPost: TiebaThreadPost?
   var subPosts: [TiebaThreadPost] = []
+  var threadId = ""
+  var forumId = ""
+  var forumName = ""
   var current = 1
   var total = 0
   var hasMore = false
@@ -152,7 +155,7 @@ struct TiebaThreadFloorPage: Sendable {
 
 enum TiebaThreadAPI {
   /// 帖子页：优先读持久缓存（SWR），成功写原始 protobuf Data，失败回退最近缓存。
-  /// 缓存键含当前账号、thread/page/postId/seeLz/sort，切号或换排序不会串数据。
+  /// 缓存键含账号、主题、页码、锚点和排序条件。不同入口可复用同一主题的缓存。
   ///
   /// `preferCache` 默认 true —— **每次进帖都该先拿缓存**。旧实现在这里有个
   /// 「本进程同一 scope 只 seed 一次」的闸门，导致退出再进（同一 threadId ⇒ 同一
@@ -164,13 +167,19 @@ enum TiebaThreadAPI {
     postId: String?,
     seeLz: Bool,
     sort: TiebaThreadSort,
-    preferCache: Bool = true
+    forumId: String? = nil,
+    preferCache: Bool = true,
+    allowStaleOnError: Bool = true
   ) async throws -> TiebaThreadPage {
-    guard threadId.isEmpty == false else { throw TiebaForumAPIError.invalidURL }
+    let request = try TiebaThreadPageRequest(
+      threadId: threadId, postId: postId, forumId: forumId, page: page
+    )
+    let threadId = String(request.threadID)
+    let anchor = request.pageNumber == 0 ? request.postID.map { String($0) } : nil
     let scope = cacheScope(
       threadId: threadId,
       page: page,
-      postId: postId,
+      request: request,
       seeLz: seeLz,
       sort: sort
     )
@@ -180,13 +189,16 @@ enum TiebaThreadAPI {
          maxStale: TiebaPageCacheKind.thread.maxStale
        ),
        TiebaPageCache.isScopeCurrent(scope),
-       let cached = try? await decodePageData(entry.payload, threadId: threadId, page: page) {
+       let cached = try? await decodePageData(entry.payload, threadId: threadId, page: page, anchor: anchor) {
+      try Task.checkCancellation()
+      guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
       if entry.isFresh() == false {
         scheduleRevalidate(
           scope: scope,
           threadId: threadId,
           page: page,
-          postId: postId,
+          request: request,
+          anchor: anchor,
           seeLz: seeLz,
           sort: sort
         )
@@ -195,30 +207,40 @@ enum TiebaThreadAPI {
     }
 
     do {
+      guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
       let data = try await fetchRawPageData(
-        threadId: threadId,
-        page: page,
-        postId: postId,
+        request: request,
         seeLz: seeLz,
         sort: sort
       )
-      let result = try await decodePageData(data, threadId: threadId, page: page)
-      if TiebaPageCache.isScopeCurrent(scope) {
-        TiebaPageCache.shared.storeInBackground(
-          scope: scope,
-          payload: data,
-          ttl: TiebaPageCacheKind.thread.freshTTL
-        )
-      }
+      let result = try await decodePageData(data, threadId: threadId, page: page, anchor: anchor)
+      try Task.checkCancellation()
+      guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
+      TiebaPageCache.shared.storeInBackground(
+        scope: scope,
+        payload: data,
+        ttl: TiebaPageCacheKind.thread.freshTTL
+      )
       return result
     } catch {
-      if TiebaPageCache.isScopeCurrent(scope),
-         TiebaPageCache.shouldFallbackToCache(error),
+      if anchor != nil, let error = error as? TiebaThreadPageError, error.allowsUnanchoredLookup {
+        try Task.checkCancellation()
+        guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
+        // The requested floor can disappear independently of the thread.
+        return try await Self.page(
+          threadId: threadId, page: page, postId: nil, seeLz: seeLz, sort: sort,
+          forumId: forumId, preferCache: preferCache, allowStaleOnError: allowStaleOnError
+        )
+      }
+      if allowStaleOnError, TiebaPageCache.isScopeCurrent(scope),
+         (TiebaPageCache.shouldFallbackToCache(error) || (error as? TiebaThreadPageError)?.allowsStaleCache == true),
          let entry = await TiebaPageCache.shared.load(
            scope: scope,
            maxStale: TiebaPageCacheKind.thread.maxStale
          ),
-         let cached = try? await decodePageData(entry.payload, threadId: threadId, page: page) {
+         let cached = try? await decodePageData(entry.payload, threadId: threadId, page: page, anchor: anchor) {
+        try Task.checkCancellation()
+        guard TiebaPageCache.isScopeCurrent(scope) else { throw CancellationError() }
         return cached
       }
       throw error
@@ -228,25 +250,27 @@ enum TiebaThreadAPI {
   private static func cacheScope(
     threadId: String,
     page: Int,
-    postId: String?,
+    request: TiebaThreadPageRequest,
     seeLz: Bool,
     sort: TiebaThreadSort
   ) -> TiebaPageCacheScope {
-    let pageKey = [
+    var fields = [
       threadId,
       String(page),
-      postId ?? "",
+      request.postID.map { String($0) } ?? "",
       seeLz ? "lz" : "all",
       String(sort.rawValue),
-    ].joined(separator: "\u{1F}")
-    return TiebaPageCache.scope(kind: .thread, pageKey: pageKey)
+    ]
+    if request.pageNumber == 0 { fields.append("locate-v2") }
+    return TiebaPageCache.scope(kind: .thread, pageKey: fields.joined(separator: "\u{1F}"))
   }
 
   private static func scheduleRevalidate(
     scope: TiebaPageCacheScope,
     threadId: String,
     page: Int,
-    postId: String?,
+    request: TiebaThreadPageRequest,
+    anchor: String?,
     seeLz: Bool,
     sort: TiebaThreadSort
   ) {
@@ -255,14 +279,12 @@ enum TiebaThreadAPI {
       defer { TiebaPageCache.shared.endRevalidation(scope: scope) }
       guard TiebaPageCache.isScopeCurrent(scope),
             let data = try? await fetchRawPageData(
-        threadId: threadId,
-        page: page,
-        postId: postId,
+        request: request,
         seeLz: seeLz,
         sort: sort
       ) else { return }
       guard TiebaPageCache.isScopeCurrent(scope),
-            (try? await decodePageData(data, threadId: threadId, page: page)) != nil else { return }
+            (try? await decodePageData(data, threadId: threadId, page: page, anchor: anchor)) != nil else { return }
       TiebaPageCache.shared.store(
         scope: scope,
         payload: data,
@@ -272,18 +294,17 @@ enum TiebaThreadAPI {
   }
 
   private static func fetchRawPageData(
-    threadId: String,
-    page: Int,
-    postId: String?,
+    request parameters: TiebaThreadPageRequest,
     seeLz: Bool,
     sort: TiebaThreadSort
   ) async throws -> Data {
     try await TiebaForumAPI.protoPost(path: "/c/f/pb/page", cmd: "302001&format=protobuf") { common in
       var request = Tieba_PbPage_PbPageRequestData()
       request.common = common
-      request.kz = Int64(threadId) ?? 0
-      if let postId, let pid = Int64(postId) { request.pid = pid }
-      request.pn = Int32(page)
+      request.kz = parameters.threadID
+      if let pid = parameters.postID { request.pid = pid }
+      if let fid = parameters.forumID { request.forumID = fid }
+      request.pn = parameters.pageNumber
       // r = 排序档位（热门 2 / 正序 0 / 倒序 1），服务端自己在 pb_sort_info 里列的
       // 就是这三档（实测：热门档回的是按热度重排、不带楼层的列表）。
       request.r = Int32(sort.rawValue)
@@ -308,19 +329,41 @@ enum TiebaThreadAPI {
   private static func decodePageData(
     _ data: Data,
     threadId: String,
-    page: Int
+    page: Int,
+    anchor: String?
   ) async throws -> TiebaThreadPage {
     let started = DispatchTime.now().uptimeNanoseconds
     let result = try await Task.detached(priority: .userInitiated) {
-      let response = try Tieba_PbPage_PbPageResponse(serializedBytes: data)
-      if response.hasError, response.error.errorCode != 0 {
-        throw TiebaViewModelError(
-          code: Double(response.error.errorCode),
-          message: response.error.errorMsg
-        )
+      let response: Tieba_PbPage_PbPageResponse
+      do {
+        response = try Tieba_PbPage_PbPageResponse(serializedBytes: data)
+      } catch {
+        if (try? JSONSerialization.jsonObject(with: data)) != nil {
+          throw TiebaThreadPageError.unexpectedJSON
+        }
+        throw TiebaThreadPageError.invalidProtobuf
       }
-      guard response.hasData else { throw TiebaForumAPIError.invalidResponse }
-      return makePage(response.data, threadId: threadId, page: page)
+      if response.hasError, response.error.errorCode != 0 {
+        throw TiebaThreadPageError.business(Int(response.error.errorCode), response.error.errorMsg)
+      }
+      guard response.hasData else { throw TiebaThreadPageError.missingData }
+      let data = response.data
+      guard data.hasThread || data.hasPage || !data.postList.isEmpty || data.hasFirstFloorPost else {
+        throw TiebaThreadPageError.missingData
+      }
+      if data.hasThread {
+        let info = data.thread
+        let responseID = info.threadID > 0 ? info.threadID : info.id
+        if responseID > 0, String(responseID) != threadId {
+          throw TiebaThreadPageError.unexpectedThread
+        }
+        if info.isDeleted == 1 { throw TiebaThreadPageError.deleted }
+      }
+      let result = makePage(data, threadId: threadId, page: page)
+      if let anchor, !result.posts.contains(where: { $0.id == anchor }) {
+        throw TiebaThreadPageError.missingAnchor
+      }
+      return result
     }.value
     TiebaPageCache.debugDidDecode(kind: .thread, pageKey: threadId, started: started)
     return result
@@ -332,16 +375,19 @@ enum TiebaThreadAPI {
     threadId: String,
     postId: String,
     forumId: String,
-    page: Int
+    page: Int,
+    focusCommentID: String? = nil
   ) async throws -> TiebaThreadFloorPage {
-    guard !threadId.isEmpty, !postId.isEmpty else { throw TiebaForumAPIError.invalidURL }
+    guard let kz = TiebaRoutePath.positiveID(threadId),
+          let pid = TiebaRoutePath.positiveID(postId) else { throw TiebaForumAPIError.invalidURL }
     let data = try await TiebaForumAPI.protoPost(path: "/c/f/pb/floor", cmd: "302002&format=protobuf") { common in
       var request = Tieba_PbFloor_PbFloorRequestData()
       request.common = common
-      request.kz = Int64(threadId) ?? 0
-      request.pid = Int64(postId) ?? 0
+      request.kz = kz
+      request.pid = pid
+      if let id = TiebaRoutePath.positiveID(focusCommentID) { request.spid = id }
       request.pn = Int32(page)
-      request.forumID = Int64(forumId) ?? 0
+      if let fid = TiebaRoutePath.positiveID(forumId) { request.forumID = fid }
       // 与 JS encodePbFloorRequest 的非零常量逐项一致（其余保持 proto 默认 0）。
       request.scrW = 1170
       request.scrH = 2532
@@ -461,6 +507,14 @@ enum TiebaThreadAPI {
     if data.hasPost, data.post.id != 0 || !data.post.content.isEmpty {
       result.floorPost = post(data.post, threadId: threadId, users: [:])
     }
+    if data.hasThread {
+      let id = data.thread.id != 0 ? data.thread.id : data.thread.threadID
+      if id > 0 { result.threadId = String(id) }
+    }
+    if data.hasForum, data.forum.id > 0, !data.forum.name.isEmpty {
+      result.forumId = String(data.forum.id)
+      result.forumName = data.forum.name
+    }
     result.subPosts = data.subpostList.compactMap(subPost)
     let current = data.page.currentPage > 0 ? Int(data.page.currentPage) : page
     let total = data.page.totalPage > 0 ? Int(data.page.totalPage) : Int(data.page.totalCount)
@@ -506,9 +560,9 @@ enum TiebaThreadAPI {
 
   private static func thread(_ raw: Tieba_ThreadInfo, forum: Tieba_SimpleForum?) -> TiebaThreadInfo {
     var info = TiebaThreadInfo()
-    info.id = String(raw.id != 0 ? raw.id : raw.threadID)
+    info.id = TiebaViewModelMapper.firstPositiveID(raw.threadID, raw.id)
     info.title = raw.title
-    info.forumId = String(raw.forumID != 0 ? raw.forumID : (forum?.id ?? 0))
+    info.forumId = TiebaViewModelMapper.firstPositiveID(raw.forumID, forum?.id)
     info.forumName = raw.forumName.isEmpty ? (forum?.name ?? "") : raw.forumName
     info.forumAvatar = forum?.avatar ?? ""
     let author = raw.hasAuthor ? raw.author : Tieba_User()

@@ -271,15 +271,7 @@ public enum TiebaViewModelMapper {
     let rawAuthor = nonEmptyDict(rd["author"])
     let authorId = str(coalesce(rd["authorId"], rd["author_id"], rawAuthor?["id"], ""))
     let author = rawAuthor ?? userMap[authorId] ?? [:]
-    let forumDict = dict(forum) ?? [:]
-    let forumInfo = dict(coalesce(rd["forumInfo"], rd["forum_info"]))
-    let resolvedForumName = coalesce(
-      forumName,
-      rd["forumName"], rd["forum_name"],
-      forumInfo?["name"],
-      forumDict["name"],
-      ""
-    )!
+    let resolvedForum = forumIdentity(rd, fallback: dict(forum), name: forumName)
 
     let abstractRaw = coalesce(rd["_abstract"], rd["abstract"])
     let abstract: String
@@ -297,25 +289,25 @@ public enum TiebaViewModelMapper {
     let mediaList = mapMediaList(rd)
 
     var out: [String: Any] = [:]
-    out["id"] = str(coalesce(rd["id"], rd["threadId"], rd["thread_id"], ""))
+    out["id"] = firstPositiveID(rd["id"], rd["threadId"], rd["thread_id"], rd["tid"])
     // rd 已是 [String: Any]，不再走 isAdThread(raw) 的二次 bridge。
     out["isAd"] = isNullish(coalesce(rd["alaInfo"], rd["ala_info"])) == false
     // ⚠️ **不能拿 id 兜 threadId**：回复类推荐卡的 id(1) 是**回复 pid**、threadId(2) 才是帖子本体
     //（见下面 postId 的注释）。原来的 coalesce 里带了 rd["id"]，于是"回复卡没有 threadId 字段"时
     // threadId 被填成 pid → 点卡导航按 pid 请求帖子 → 服务端回"帖子不存在"→ 前端显示
     // "帖子已被删除"（用户实证）。宁可留空（导航侧会拒绝），也不能填成**另一个对象的 id**。
-    out["threadId"] = str(coalesce(rd["threadId"], rd["thread_id"], ""))
-    out["firstPostId"] = str(coalesce(rd["firstPostId"], rd["first_post_id"], ""))
+    out["threadId"] = firstPositiveID(rd["threadId"], rd["thread_id"], rd["tid"])
+    out["firstPostId"] = firstPositiveID(rd["firstPostId"], rd["first_post_id"])
     // 被推荐的那条回复（"回复了xxx"类卡片）：ThreadInfo.post_id(52) = 回复 pid。
     // 这类卡上 id(1) 不是帖子 id、threadId(2) 才是 —— 导航用 threadId + 这个 pid。
-    out["postId"] = str(coalesce(rd["postId"], rd["post_id"], ""))
+    out["postId"] = firstPositiveID(rd["postId"], rd["post_id"])
     // 帖子/回复已被删除标记（ThreadInfo.is_deleted(181)）。推荐流会把原帖已删的
     // 卡片继续下发，点进去只剩「帖子已被删除」（issue #14）；feed 过滤要这两个标记。
     out["isDeleted"] = number(coalesce(rd["isDeleted"], rd["is_deleted"], 0)) != 0
     out["title"] = coalesce(rd["title"], "")!
-    out["forumId"] = str(coalesce(rd["forumId"], rd["forum_id"], rd["fid"], forumInfo?["id"], forumDict["id"], ""))
-    out["forumName"] = jsOr(resolvedForumName, rd["fname"], "")!
-    out["forumAvatar"] = coalesce(forumInfo?["avatar"], forumDict["avatar"], rd["forumAvatar"], rd["forum_avatar"], "")!
+    out["forumId"] = resolvedForum.id
+    out["forumName"] = resolvedForum.name
+    out["forumAvatar"] = resolvedForum.avatar
     out["authorId"] = authorId
     out["authorName"] = coalesce(author["name"], author["userName"], author["user_name"], "")!
     out["authorNameShow"] = coalesce(author["nameShow"], author["name_show"], author["showNickname"], author["show_nickname"], author["name"], "")!
@@ -356,18 +348,41 @@ public enum TiebaViewModelMapper {
     out["isShareThread"] = strictOne(coalesce(rd["isShareThread"], rd["is_share_thread"], 0))
     if truthy(originRaw) {
       let od = dict(originRaw) ?? [:]
+      let originForum = forumIdentity(od)
       out["originThreadInfo"] = [
         "title": coalesce(od["title"], "")!,
         "content": coalesce(od["content"], "")!,
-        "forumName": coalesce(od["fname"], od["forumName"], "")!,
+        "forumName": originForum.name,
+        "forumId": originForum.id,
         // 原帖 thread id（proto tid）：引用卡点击跳原帖用；服务端不回就空串。
-        "threadId": coalesce(od["tid"], od["threadId"], od["thread_id"], "")!,
+        "threadId": firstPositiveID(od["tid"], od["threadId"], od["thread_id"]),
         // 被引用的原帖是否已删（OriginThreadInfo.is_deleted(9)）。
         "isDeleted": number(coalesce(od["isDeleted"], od["is_deleted"], 0)) != 0,
         "media": mapMediaList(originRaw),
       ] as [String: Any]
     }
     return out
+  }
+
+  static func firstPositiveID(_ values: Any?...) -> String {
+    values.lazy.compactMap { TiebaRoutePath.positiveID($0) }.first.map { String($0) } ?? ""
+  }
+
+  static func forumIdentity(
+    _ row: [String: Any], fallback: [String: Any]? = nil, name: Any? = nil
+  ) -> (id: String, name: String, avatar: String) {
+    let nested = [dict(row["forumInfo"]), dict(row["forum_info"]), dict(row["forum"]), fallback].compactMap { $0 }
+    let names: [Any?] = [row["forumName"], row["forum_name"], row["fname"]]
+      + nested.flatMap { [$0["name"], $0["forumName"], $0["forum_name"]] }
+      + [name]
+    let ids: [Any?] = [row["forumId"], row["forum_id"], row["fid"]]
+      + nested.flatMap { [$0["id"], $0["forumId"], $0["forum_id"], $0["fid"]] }
+    let avatars: [Any?] = nested.map { $0["avatar"] } + [row["forumAvatar"], row["forum_avatar"]]
+    return (
+      ids.lazy.compactMap { TiebaRoutePath.positiveID($0) }.first.map { String($0) } ?? "",
+      names.lazy.compactMap { $0 as? String }.first { !$0.isEmpty } ?? "",
+      avatars.lazy.compactMap { $0 as? String }.first { !$0.isEmpty } ?? ""
+    )
   }
 
   // MARK: - feed.ts 纯投影（分页/吧头像回填/增量 Unix 状态留在 JS）
@@ -396,7 +411,7 @@ public enum TiebaViewModelMapper {
       guard truthy(threadRaw), let tr = dict(threadRaw) else { continue }
       let tid = coalesce(tr["id"], tr["tid"], tr["thread_id"], tr["threadId"])
       if isNullish(tid) && isNullish(tr["title"]) { continue }
-      let forum = coalesce(tr["forum"], cd?["forum"]) ?? [:]
+      let forum = cd?["forum"]
       var merged = tr
       if let author = coalesce(tr["author"], cd?["author"]) {
         merged["author"] = author

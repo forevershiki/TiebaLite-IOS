@@ -24,6 +24,8 @@ enum TiebaPostRowEvent: Sendable {
   case copyLink
   case delete
   case subPosts
+  case composeReply(postID: String)
+  case openReplies(postID: String)
   case image(index: Int, rect: CGRect)
   case link(String)
   case user(String)

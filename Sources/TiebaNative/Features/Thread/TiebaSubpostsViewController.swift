@@ -8,7 +8,14 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   var screenTitle: String? {
     displayFloor.isEmpty ? "楼中楼" : "第\(displayFloor)楼"
   }
-  var screenRightBarItems: [UIBarButtonItem]? { openThreadBarItem() }
+  var screenRightBarItems: [UIBarButtonItem]? {
+    var items = openThreadBarItem() ?? []
+    if TiebaComposer.enabled, composerForum != nil,
+      let floor = Int(displayFloor), floor > 0 {
+      items.insert(TiebaComposer.barItem("回复此楼") { [weak self] in self?.composeReply(to: nil) }, at: 0)
+    }
+    return items.isEmpty ? nil : items
+  }
 
   private let threadId: String
   private let postId: String
@@ -21,6 +28,9 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   private var floorPost: TiebaThreadPost?
   private var subPosts: [TiebaThreadPost] = []
   private var displayFloor = ""
+  private var resolvedForum: TiebaComposerForum?
+  private var verifiedParent = false
+  private var composerFocus: String?
 
   /// 父楼作为固定上下文摘要，不参与主列表行排布；子回复才进入 conversation list。
   private let topBackdrop = UIView()
@@ -326,7 +336,11 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   // MARK: - 数据
 
   override func reload() {
-    guard !isLoading else {
+    reloadFloor()
+  }
+
+  private func reloadFloor(force: Bool = false, focus: String? = nil, submitted: Bool = false) {
+    guard force || !isLoading else {
       list.endRefreshing()
       return
     }
@@ -344,19 +358,26 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
     }
     Task { @MainActor in
       defer {
-        self.isLoading = false
-        self.isUserRefresh = false
-        self.list.endRefreshing()
+        if generation == self.loadGeneration {
+          self.isLoading = false
+          self.isUserRefresh = false
+          self.list.endRefreshing()
+        }
       }
       do {
         let page = try await TiebaThreadAPI.floor(
           threadId: self.threadId,
           postId: self.postId,
           forumId: self.forumId,
-          page: 1
+          page: 1,
+          focusCommentID: focus
         )
+        guard generation == self.loadGeneration else { return }
+        self.composerFocus = focus
         self.apply(page, replacing: true, generation: generation)
-        if generation == self.loadGeneration, self.isUserRefresh {
+        if submitted {
+          self.pill.showResult(success: true, text: "楼中楼回复已发送")
+        } else if self.isUserRefresh {
           TiebaSceneHaptics.fire("toggle")
         }
       } catch {
@@ -368,7 +389,7 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
           if self.rowPosts.isEmpty {
             self.showEmptyConversation()
           }
-          self.pill.showResult(success: false, text: "加载失败")
+          self.pill.showResult(success: false, text: submitted ? "回复已发送，刷新失败" : "加载失败")
         }
       }
     }
@@ -408,10 +429,14 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
     if replacing {
       floorPost = page.floorPost
       subPosts = page.subPosts
-      if displayFloor.isEmpty, let floor = page.floorPost?.floor, floor > 0 {
-        displayFloor = String(floor)
-        if let host = parent as? TiebaRouteHostViewController { host.syncNativeScreenChrome() }
+      verifiedParent = page.floorPost?.id == postId && (page.threadId.isEmpty || page.threadId == threadId)
+      if !page.forumId.isEmpty, !page.forumName.isEmpty {
+        resolvedForum = TiebaComposerForum(id: page.forumId, name: page.forumName)
       }
+      if let floor = page.floorPost?.floor, floor > 0, displayFloor != String(floor) {
+        displayFloor = String(floor)
+      }
+      (parent as? TiebaRouteHostViewController)?.syncNativeScreenChrome()
     } else {
       // 服务端每页会回吐楼层本体：仅在本页缺父楼时补上（按 id 去重回复）。
       if floorPost == nil { floorPost = page.floorPost }
@@ -552,6 +577,12 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
       if shouldStickToTop {
         self.list.scrollToTop(animated: false)
       }
+      if let focus = self.composerFocus {
+        self.composerFocus = nil
+        if let index = box.posts.firstIndex(where: { $0.id == focus }) {
+          self.list.scrollToPostRow(index)
+        }
+      }
       self.view.setNeedsLayout()
       self.refreshMediaVisibility()
     }
@@ -581,8 +612,11 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
     case .delete:
       // 只读客户端：保留事件兼容，无写动作。
       break
-    case .subPosts:
+    case .subPosts, .openReplies:
       break
+    case .composeReply(let id):
+      guard let target = subPosts.first(where: { $0.id == id }) else { return }
+      composeReply(to: target)
     case .image(let mediaIndex, let rect):
       openImageBrowser(post: post, index: mediaIndex, rect: rect)
     case .link(let url):
@@ -621,7 +655,9 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
       openParentImageBrowser(index: mediaIndex, rect: rect)
     case .link(let url):
       TiebaLinkOpener.open(url)
-    case .delete, .subPosts, .toggleSeeLz, .selectSort:
+    case .composeReply(let id):
+      if id == postId { composeReply(to: nil) }
+    case .delete, .subPosts, .openReplies, .toggleSeeLz, .selectSort:
       break
     }
   }
@@ -643,6 +679,39 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   }
 
   // MARK: - 动作
+
+  private var composerForum: TiebaComposerForum? {
+    guard verifiedParent else { return nil }
+    if let resolvedForum { return resolvedForum }
+    guard TiebaComposerTarget.isPositiveID(forumId, signed: true), !forumName.isEmpty else { return nil }
+    return TiebaComposerForum(id: forumId, name: forumName)
+  }
+
+  private func composeReply(to comment: TiebaThreadPost?) {
+    guard let forum = composerForum else {
+      pill.showResult(success: false, text: "未能确认回复目标，请刷新")
+      return
+    }
+    let floor = floorPost.flatMap { $0.floor > 0 ? $0.floor : nil } ?? Int(displayFloor) ?? 0
+    let target: TiebaComposerTarget
+    if let comment {
+      target = .comment(forum, threadID: threadId, parentID: postId, floor: floor,
+        commentID: comment.id, recipient: comment.composerRecipient)
+    } else {
+      let recipient = floorPost?.composerRecipient ?? TiebaComposerRecipient(id: "", name: "", summary: "")
+      target = .floor(forum, threadID: threadId, parentID: postId, floor: floor, recipient: recipient)
+    }
+    TiebaComposer.present(from: presenterViewController, target: target, onCheck: { [weak self] in
+      self?.reloadFloor(force: true)
+    }, onSuccess: { [weak self] destination in
+      guard let self, case .floor(let thread, let parent, let commentID) = destination,
+        thread == self.threadId, parent == self.postId else { return }
+      NotificationCenter.default.post(name: TiebaComposer.floorDidReceiveReply, object: nil, userInfo: [
+        "thread": thread, "parent": parent, "account": TiebaSession.activeUid,
+      ])
+      self.reloadFloor(force: true, focus: commentID, submitted: true)
+    })
+  }
 
   /// 单行重发（点赞用）：只重建这一行的模型并替换页内那一条，**不整页 publish**。
   /// 改前点赞走 publish(fresh: false)：整页行会被重新测量一遍（几十行 TextKit），
@@ -749,7 +818,7 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
     let title = threadTitle.trimmingCharacters(in: .whitespacesAndNewlines)
     if title.isEmpty == false { lines.append(title) }
     let forum = forumName.trimmingCharacters(in: .whitespacesAndNewlines)
-    if forum.isEmpty == false { lines.append("\(forum)吧") }
+    if forum.isEmpty == false { lines.append(TiebaForumFormat.displayName(forum)) }
     lines.append(url)
     TiebaShareSheet.present(text: lines.joined(separator: "\n"), from: presenterViewController)
   }
@@ -792,7 +861,7 @@ final class TiebaSubpostsViewController: TiebaPostListPageController, TiebaNativ
   private func openThread() {
     guard !threadId.isEmpty else { return }
     TiebaSceneHaptics.fire("press")
-    TiebaNavigator.shared.navigate(.thread(id: threadId))
+    TiebaNavigator.shared.navigate(.thread(id: threadId, forumId: forumId, forumName: forumName))
   }
 
   // MARK: - 顶栏

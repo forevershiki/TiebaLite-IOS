@@ -1234,7 +1234,7 @@ final class TiebaHomeViewController: UIViewController, TiebaTabReselectable {
   private func confirmUnfollow(_ forum: TiebaForumInfo) {
     let alert = UIAlertController(
       title: "取消关注",
-      message: "确定不再关注「\(forum.forumName)吧」吗？",
+      message: "确定不再关注「\(TiebaForumFormat.displayName(forum.forumName))」吗？",
       preferredStyle: .alert
     )
     alert.addAction(UIAlertAction(title: "取消", style: .cancel))

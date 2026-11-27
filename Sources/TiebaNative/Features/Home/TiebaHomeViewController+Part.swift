@@ -191,7 +191,7 @@ final class TiebaHomeForumCell: UICollectionViewCell {
     )
     let accessibilityLayout = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
     nameLabel.numberOfLines = accessibilityLayout ? 2 : 1
-    nameLabel.text = "\(forum.displayName)吧"
+    nameLabel.text = TiebaForumFormat.displayName(forum.displayName)
     metaLabel.text = forum.memberCount > 0 ? "\(TiebaForumFormat.count(forum.memberCount)) 关注" : nil
     metaLabel.isHidden = forum.memberCount <= 0
     textToChip?.isActive = accessibilityLayout == false
@@ -208,7 +208,7 @@ final class TiebaHomeForumCell: UICollectionViewCell {
     checkIcon.isHidden = !forum.isSign
     chip.isHidden = accessibilityLayout || (forum.levelId <= 0 && forum.isSign == false)
     chip.backgroundColor = .tertiarySystemFill
-    var spoken: [String] = ["\(forum.displayName)吧"]
+    var spoken: [String] = [TiebaForumFormat.displayName(forum.displayName)]
     if forum.memberCount > 0 {
       spoken.append("\(TiebaForumFormat.count(forum.memberCount))关注")
     }
@@ -334,7 +334,7 @@ final class TiebaHistoryPill: UIControl {
       url: TiebaSimpleRowParser.avatarURL(portrait)?.absoluteString ?? "",
       initial: name.isEmpty ? "吧" : String(name.prefix(1))
     )
-    accessibilityLabel = "进入\(name)吧"
+    accessibilityLabel = "进入\(TiebaForumFormat.displayName(name))"
   }
 
   override var isHighlighted: Bool {
