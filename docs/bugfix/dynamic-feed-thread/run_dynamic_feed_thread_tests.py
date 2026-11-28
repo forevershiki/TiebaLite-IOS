@@ -59,7 +59,7 @@ def check_sources():
     print("PASS: checked-in pb/page fields, default pn and optional forum_id")
 
     entries = {
-        "Explore/TiebaExploreFeedViewController.swift": "TiebaThreadCardTarget.card(thread)",
+        "Explore/TiebaExploreFeedViewController.swift": "TiebaThreadCardTarget.opening(thread, personalized: segment == .personalized, reference: reference)",
         "Explore/TiebaHotListViewController.swift": "TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true)",
         "Explore/TiebaTopicViewController.swift": "TiebaThreadCardTarget.card(threads[index])",
         "Forum/TiebaForumViewController.swift": "TiebaThreadCardTarget.card(row, allowLegacyTopicID: true)",

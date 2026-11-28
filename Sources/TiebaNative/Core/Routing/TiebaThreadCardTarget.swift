@@ -54,6 +54,66 @@ struct TiebaThreadCardTarget {
     return Opening(target: card(row), rule: .standardCard)
   }
 
+  static func shareURL(for target: Self, verifiedReply: Bool, opening: Opening.Rule) -> String? {
+    guard !opening.requiresExactReply || verifiedReply else { return nil }
+    return "https://tieba.baidu.com/p/\(target.threadId)"
+  }
+
+  struct AgreeTarget: Sendable {
+    let threadId: String
+    let firstPostId: String?
+    let replyAnchor: String?
+  }
+
+  /// Feed hearts use the thread-level operation only for an independently identified topic.
+  static func agreeTarget(_ row: [String: Any], personalized: Bool) -> AgreeTarget? {
+    let opening = opening(row, personalized: personalized)
+    guard !opening.rule.requiresExactReply, let target = opening.target, target.kind != .reference,
+          target.threadId == TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])
+    else { return nil }
+    let first = TiebaViewModelMapper.firstPositiveID(row["firstPostId"], row["first_post_id"])
+    let firstPostId = first.isEmpty || first == target.threadId ? nil : first
+    // A reply-shaped row needs its own topic-level first-post evidence.
+    if target.kind == .reply, firstPostId == nil { return nil }
+    return AgreeTarget(threadId: target.threadId, firstPostId: firstPostId, replyAnchor: target.postId)
+  }
+
+  struct FeedbackTarget: Sendable {
+    let threadId: String
+    let forumId: String
+  }
+
+  static func recommendationFeedback(_ row: [String: Any], personalized: Bool) -> FeedbackTarget? {
+    guard personalized, let target = card(row), target.kind == .topic,
+          target.threadId == TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])
+    else { return nil }
+    let forumID = row["routingForumId"] as? String ?? TiebaViewModelMapper.routingForumID(row)
+    return FeedbackTarget(threadId: target.threadId, forumId: forumID)
+  }
+
+  struct ForumTarget: Hashable {
+    let id: String
+    let name: String
+
+    init?(_ row: [String: Any]) {
+      let id = row["routingForumId"] as? String ?? TiebaViewModelMapper.routingForumID(row)
+      let name = TiebaViewModelMapper.forumIdentity(row).name
+      guard !id.isEmpty || !name.isEmpty else { return nil }
+      self.id = id
+      self.name = name
+    }
+
+    func matches(_ other: Self) -> Bool {
+      if !id.isEmpty, !other.id.isEmpty { return id == other.id }
+      return !name.isEmpty && name == other.name
+    }
+  }
+
+  static func forumFeedback(_ row: [String: Any], personalized: Bool) -> FeedbackTarget? {
+    guard let feedback = recommendationFeedback(row, personalized: personalized), !feedback.forumId.isEmpty else { return nil }
+    return feedback
+  }
+
   private static func personalizedReplyOpening(_ row: [String: Any]) -> Opening? {
     let cardID = TiebaViewModelMapper.firstPositiveID(row["id"])
     let topicID = TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])
@@ -166,7 +226,7 @@ struct TiebaThreadCardTarget {
     return target(kind: .reference, id: id, postId: nil, row: origin)
   }
 
-  /// Card actions act on the outer repost. Opening the card follows its reference.
+  /// Legacy outer-card coordinate projection. Feed writes resolve their own targets.
   static func interaction(_ row: [String: Any]) -> Self? {
     if isShare(row) {
       let id = TiebaViewModelMapper.firstPositiveID(row["threadId"], row["thread_id"], row["tid"])
@@ -214,5 +274,50 @@ struct TiebaThreadCardTarget {
       ),
       forumName: origin?.forumName ?? (useRowName && !forum.name.isEmpty ? forum.name : nil)
     )
+  }
+}
+
+/// The optimistic state is separate from the server rows. Dropping a failed
+/// operation reveals the latest server values, including after a feed refresh.
+struct TiebaFeedAgreeState {
+  struct Ticket: Equatable {
+    let threadId: String
+    let replyAnchor: String?
+    let account: String
+    let desired: Bool
+    fileprivate let serial: UInt64
+  }
+
+  struct Count: Equatable {
+    let liked: Bool
+    let count: Double
+
+    func setting(_ desired: Bool) -> Count {
+      guard liked != desired else { return self }
+      return Count(liked: desired, count: max(0, count + (desired ? 1 : -1)))
+    }
+  }
+
+  private var pending: [String: Ticket] = [:]
+  private var serial: UInt64 = 0
+  var isEmpty: Bool { pending.isEmpty }
+
+  mutating func begin(target: TiebaThreadCardTarget.AgreeTarget, account: String, desired: Bool) -> Ticket? {
+    guard pending[target.threadId]?.account != account else { return nil }
+    serial &+= 1
+    let ticket = Ticket(threadId: target.threadId, replyAnchor: target.replyAnchor, account: account, desired: desired, serial: serial)
+    pending[target.threadId] = ticket
+    return ticket
+  }
+
+  func desired(for target: TiebaThreadCardTarget.AgreeTarget, account: String) -> Bool? {
+    guard let ticket = pending[target.threadId], ticket.account == account, ticket.replyAnchor == target.replyAnchor else { return nil }
+    return ticket.desired
+  }
+
+  mutating func finish(_ ticket: Ticket) -> Bool {
+    guard pending[ticket.threadId] == ticket else { return false }
+    pending.removeValue(forKey: ticket.threadId)
+    return true
   }
 }

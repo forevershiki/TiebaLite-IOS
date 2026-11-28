@@ -6,8 +6,12 @@ import Foundation
 enum TiebaThreadActionAPI {
   /// 点赞/取消（obj_type=3 帖级，post_id 用首楼 id；obj_type=1 楼级，post_id 用楼层 id）。
   /// 服务端 op_type 与 UI 语义相反：赞 = 0、取消 = 1（与 JS agree 同翻转）。
-  static func setAgree(threadId: String, postId: String, agree: Bool, objType: Int = 3) async throws {
+  static func setAgree(
+    threadId: String, postId: String, agree: Bool, objType: Int = 3,
+    validateSession: (@Sendable () throws -> Void)? = nil
+  ) async throws {
     guard !threadId.isEmpty, !postId.isEmpty else { throw TiebaForumAPIError.invalidResponse }
+    try validateSession?()
     let snapshot = TiebaBackgroundSnapshot.shared
     // tbs 缺失就续期（TiebaSession.requireTbs → /c/s/login，与原 JS requireTbs 逐路径一致；
     // 续期失败才抛"缺少 tbs"）。
@@ -19,8 +23,36 @@ enum TiebaThreadActionAPI {
       "op_type": agree ? "0" : "1",
       "tbs": try await TiebaSession.requireTbs(),
     ]
+    try validateSession?()
     if !snapshot.stoken.isEmpty { fields["stoken"] = snapshot.stoken }
-    _ = try await TiebaSocialAPI.signedPost(path: "/c/c/agree/opAgree", fields: fields)
+    _ = try await TiebaSocialAPI.signedPost(path: "/c/c/agree/opAgree", fields: fields, validateSession: validateSession)
+  }
+
+  static func setFeedAgree(
+    _ target: TiebaThreadCardTarget.AgreeTarget, agree: Bool, validateSession: @escaping @Sendable () throws -> Void
+  ) async throws -> String {
+    try validateSession()
+    let firstPostId = try await resolveFeedAgreePostId(target)
+    try await setAgree(threadId: target.threadId, postId: firstPostId, agree: agree, validateSession: validateSession)
+    return firstPostId
+  }
+
+  private static func resolveFeedAgreePostId(_ target: TiebaThreadCardTarget.AgreeTarget) async throws -> String {
+    if let anchor = target.replyAnchor {
+      let page = try await TiebaThreadAPI.page(
+        threadId: target.threadId, page: 1, postId: anchor, seeLz: false, sort: .hot, requiresExactReply: true
+      )
+      guard let first = target.firstPostId, first != anchor,
+            confirmedFirstPostId(in: page, threadId: target.threadId) == first
+      else { throw TiebaThreadPageError.missingAnchor }
+      return first
+    }
+    guard let first = await resolveThreadFirstPostId(
+      threadId: target.threadId, known: target.firstPostId ?? "", requireThreadIdentity: true
+    ) else {
+      throw TiebaThreadPageError.missingAnchor
+    }
+    return first
   }
 
   /// 解析帖级写操作（点赞/收藏）真正的首楼 post id。
@@ -34,7 +66,9 @@ enum TiebaThreadActionAPI {
   /// 这里按需拉一次帖子第 1 页，从 floor == 1 的楼里取 pid。`known` 不是真首楼 pid
   /// （空/"0"/等于帖子 id）时一律视为缺失。帖子页数据本身走 TiebaPageCache（SWR），
   /// 已经打开过的帖子直接命中缓存，不会重复请求。
-  static func resolveThreadFirstPostId(threadId: String, known: String = "") async -> String? {
+  static func resolveThreadFirstPostId(
+    threadId: String, known: String = "", requireThreadIdentity: Bool = false
+  ) async -> String? {
     guard !threadId.isEmpty else { return nil }
     if isUsableFirstFloorPostId(known, threadId: threadId) { return known }
     guard let page = try? await TiebaThreadAPI.page(
@@ -44,6 +78,9 @@ enum TiebaThreadActionAPI {
       seeLz: false,
       sort: .asc
     ) else { return nil }
+    if requireThreadIdentity {
+      return confirmedFirstPostId(in: page, threadId: threadId)
+    }
     if let first = page.posts.first(where: { $0.floor == 1 })?.id,
        isUsableFirstFloorPostId(first, threadId: threadId) {
       return first
@@ -53,6 +90,15 @@ enum TiebaThreadActionAPI {
       return fromThread
     }
     return nil
+  }
+
+  private static func confirmedFirstPostId(in page: TiebaThreadPage, threadId: String) -> String? {
+    guard let thread = page.thread, thread.id == threadId else { return nil }
+    let candidates = Set(
+      ([thread.firstPostId] + page.posts.filter { $0.floor == 1 }.map(\.id))
+        .filter { isUsableFirstFloorPostId($0, threadId: threadId) }
+    )
+    return candidates.count == 1 ? candidates.first : nil
   }
 
   /// 真首楼 pid 判据：非空、非 "0"、且不等于帖子 id（等于帖子 id 说明是映射层兜底值）。

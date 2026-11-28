@@ -87,6 +87,9 @@ def check_sources():
     assert "forName: TiebaSession.didChangeNotification" in explore
     assert "self?.finishReplyVerification(ticket" in explore and "$openingReplyPage.withValue(verified)" in explore
     assert "self.openingReplyPage = nil" in view and "return verified.page" in view
+    assert "resolveThreadAction(thread, action: .share" in explore
+    assert "validateSession: validate" in explore
+    assert "TiebaThreadCardTarget.forumFeedback" in explore and "TiebaThreadCardTarget.ForumTarget" in explore
     settings = read("Features/Settings/TiebaMoreSettingsViewController.swift")
     assert 'id: "replyRoutingDiagnostics", kind: .toggle' in settings
     assert "TiebaClipboard.setString(report)" in settings
@@ -105,9 +108,19 @@ def main():
         return
     support = (PREVIOUS / "DynamicFeedThreadTests.swift").read_text(encoding="utf-8").split("\n@main\n", 1)[0]
     fixtures = (HERE / "DynamicReplyRoutingTests.swift").read_text(encoding="utf-8")
+    declaration = shared["declaration"]
+    social = "enum TiebaSocialAPI {\n" + "\n\n".join(
+        declaration("Core/Networking/TiebaSocialAPI.swift", signature, "  }")
+        for signature in ("  static func signedPost(", "  private static func assertNoError(")
+    ) + '\n  private static func commonParams() -> [String: String] { [:] }\n' \
+        '  private static func stParams() -> [String: String] { [:] }\n}\n'
+    feedback = "enum TiebaFeedAPI {\n" + declaration(
+        "Core/Networking/TiebaFeedAPI.swift", "  static func submitDislike(", "  }"
+    ) + "\n}"
     shared["run_swift"](
-        shared["project_sources"](), fixtures=support + "\n" + fixtures,
+        "\n\n".join((shared["project_sources"](), social, feedback)), fixtures=support + "\n" + fixtures,
         extra_sources=(
+            "Core/Networking/TiebaThreadActionAPI.swift",
             "Core/Proto/TiebaSwiftProtoCodec.swift",
             "Core/Routing/TiebaReplyRoutingDiagnostics.swift",
             "Core/TiebaMutex.swift",

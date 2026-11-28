@@ -193,7 +193,9 @@ enum TiebaFeedAPI {
 
   // MARK: - 不感兴趣
 
-  static func submitDislike(threadId: String, dislikeIds: String, forumId: String) async throws {
+  static func submitDislike(
+    threadId: String, dislikeIds: String, forumId: String, validateSession: (@Sendable () throws -> Void)? = nil
+  ) async throws {
     let payload: [String: Any] = [
       "tid": threadId,
       "dislike_ids": dislikeIds,
@@ -203,10 +205,10 @@ enum TiebaFeedAPI {
     ]
     guard let jsonData = try? JSONSerialization.data(withJSONObject: [payload]),
       let json = String(data: jsonData, encoding: .utf8)
-    else { return }
+    else { throw TiebaForumAPIError.invalidResponse }
     _ = try await TiebaSocialAPI.signedPost(
       path: "/c/c/excellent/submitDislike",
-      fields: ["dislike": json, "dislike_from": "homepage"]
+      fields: ["dislike": json, "dislike_from": "homepage"], validateSession: validateSession
     )
   }
 
@@ -267,7 +269,7 @@ enum TiebaFeedAPI {
   /// 序列化（~1ms 级）留在调用线程，KV 写事务（含 fsync）挪后台：首屏成功路径
   /// 不被一条写事务拖住。旧死键的清理 DELETE 随写同批进后台（此后每次都命中
   /// 0 行，只花后台线程）。
-  static func saveSnapshot(_ items: [[String: Any]], segment: String) {
+  static func saveSnapshot(_ items: [[String: Any]], segment: String, accountKey: String) {
     guard !items.isEmpty else { return }
     var cachedItems = Array(items.prefix(snapshotMaxItems))
     #if DEBUG
@@ -285,9 +287,9 @@ enum TiebaFeedAPI {
     guard let data = try? JSONSerialization.data(withJSONObject: payload),
       let text = String(data: data, encoding: .utf8)
     else { return }
-    let key = snapshotKey(segment: segment, uid: TiebaBackgroundSnapshot.shared.uid)
+    let key = snapshotKey(segment: segment, uid: accountKey)
     let legacyKey = snapshotKey
-    let cacheScope = TiebaPageCache.scope(kind: .feed, pageKey: segment)
+    let cacheScope = TiebaPageCacheScope(kind: .feed, accountKey: accountKey, pageKey: segment)
     // 只抽 URL（Sendable），真正的 Nuke 磁盘预取在 worker 上发起；首图是否已在
     // Nuke DataCache 由 Nuke 自己判断，URL/处理器参数不改写，不会绕开展示键。
     let firstImageURLs = firstImageURLs(in: items, limit: 6)

@@ -2,10 +2,345 @@ import Foundation
 import SwiftProtobuf
 import TiebaNativeProto
 
+private actor InteractionTransport {
+  struct Call: Sendable {
+    let path: String
+    let body: String
+
+    var fields: [String: String] {
+      var url = URLComponents()
+      url.percentEncodedQuery = body
+      return Dictionary(uniqueKeysWithValues: (url.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+    }
+  }
+
+  static let shared = InteractionTransport()
+  private(set) var calls: [Call] = []
+  private var code = 0
+
+  func reset(code: Int = 0) {
+    calls = []
+    self.code = code
+  }
+
+  func send(path: String, body: String) -> Data {
+    calls.append(Call(path: path, body: body))
+    return Data("{\"error_code\":\(code)}".utf8)
+  }
+}
+
+// Authentication and network are synthetic. The suite compiles the actual
+// action, feedback, signed-form serialization and business-response methods.
+enum TiebaSession {
+  @TaskLocal static var duringTbs: (@Sendable () -> Void)? = nil
+
+  static func requireTbs() async throws -> String {
+    duringTbs?()
+    return "fixture"
+  }
+}
+
+final class TiebaBackgroundSnapshot: Sendable {
+  static let shared = TiebaBackgroundSnapshot()
+  let uid = ""
+  let stoken = ""
+  let bduss = ""
+}
+
+enum TiebaSigner {
+  static func signParams(_ fields: [String: String]) -> String { "fixture" }
+}
+
+enum TiebaJSON {
+  static func int(_ object: [String: Any]?, _ keys: String...) -> Int? {
+    keys.lazy.compactMap { object?[$0] as? Int }.first
+  }
+
+  static func string(_ object: [String: Any]?, _ keys: String...) -> String? {
+    keys.lazy.compactMap { object?[$0] as? String }.first
+  }
+}
+
+final class TiebaHttpClient: Sendable {
+  struct Response: Sendable {
+    let status: Int
+    let bodyData: Data
+  }
+
+  static let shared = TiebaHttpClient()
+
+  func send(
+    urlString: String, method: String, headers: [String: String], body: String,
+    formParts: [String], requestId: String, timeoutMs: Int
+  ) async throws -> Response {
+    guard method == "POST", let url = URL(string: urlString), url.host == "tiebac.baidu.com" else {
+      throw FixtureFailure("Unexpected interaction transport")
+    }
+    return Response(status: 200, bodyData: await InteractionTransport.shared.send(path: url.path, body: body))
+  }
+}
+
 @main
 struct DynamicReplyRoutingTests {
   static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw FixtureFailure(message) }
+  }
+
+  static func verifyInteractions() async throws {
+    let topic = TiebaViewModelMapper.mapProtoThread([
+      "id": "901", "threadId": "123", "firstPostId": "789", "forumId": "31",
+    ])
+    let reply = TiebaViewModelMapper.mapProtoThread([
+      "id": "902", "threadId": "123", "firstPostId": "789", "postId": "456", "forumId": "31",
+    ])
+    let sibling = TiebaViewModelMapper.mapProtoThread([
+      "id": "903", "threadId": "123", "firstPostId": "789", "postId": "457", "forumId": "31",
+    ])
+    let event = TiebaViewModelMapper.mapProtoThread([
+      "id": "2100000009798432", "threadId": "2100000009798432", "postId": "154184058416", "forumId": "1937070",
+      "originThreadInfo": ["tid": "11230786026"],
+    ])
+    let repost = TiebaViewModelMapper.mapProtoThread([
+      "id": "904", "threadId": "904", "isShareThread": 1, "firstPostId": "905",
+      "originThreadInfo": ["tid": "123", "pid": "456"],
+    ])
+    await PageTransport.shared.arrange([])
+    for row in [topic, reply, repost] {
+      let opening = TiebaThreadCardTarget.opening(row, personalized: true)
+      guard let target = opening.target else { throw FixtureFailure("Missing share target") }
+      try expect(
+        TiebaThreadCardTarget.shareURL(for: target, verifiedReply: false, opening: opening.rule) == "https://tieba.baidu.com/p/123",
+        "S01, S02, S06 use the ordinary or cited thread, never a PID"
+      )
+    }
+    let quote = TiebaThreadCardTarget.opening(repost, personalized: true, reference: true)
+    guard let quoteTarget = quote.target else { throw FixtureFailure("Missing explicit reference target") }
+    try expect(
+      TiebaThreadCardTarget.shareURL(for: quoteTarget, verifiedReply: false, opening: quote.rule) == "https://tieba.baidu.com/p/123",
+      "S06 explicit reference uses the cited topic"
+    )
+    let directReads = try await PageTransport.shared.pageRequests()
+    try expect(directReads.isEmpty, "Ordinary and repost share are local decisions")
+    let special = TiebaThreadCardTarget.opening(event, personalized: true)
+    guard let share = special.target else { throw FixtureFailure("Missing event share candidate") }
+    try expect(TiebaThreadCardTarget.shareURL(for: share, verifiedReply: false, opening: special.rule) == nil, "S05 no speculative URL")
+    await PageTransport.shared.arrange([.success(try pageData(kz: 11230786026, pid: 154184058416))])
+    _ = try await TiebaThreadAPI.verifyReply(
+      threadId: share.threadId, postId: share.postId, forumId: share.forumId, sort: .hot, accountKey: "synthetic"
+    )
+    let shareReads = try await PageTransport.shared.pageRequests()
+    try expect(
+      shareReads.count == 1 && shareReads[0].kz == 11230786026 && shareReads[0].pid == 154184058416
+        && shareReads[0].hasPid && !shareReads[0].hasForumID && shareReads[0].pn == 0,
+      "S03/S04 verify the exact origin before creating the link"
+    )
+    try expect(
+      TiebaThreadCardTarget.shareURL(for: share, verifiedReply: true, opening: special.rule) == "https://tieba.baidu.com/p/11230786026",
+      "S03 correct origin URL"
+    )
+    try await rejectUnverifiedReply(
+      share.route(), response: pageData(kz: 11230786026, pid: nil), error: .missingAnchor
+    )
+
+    await InteractionTransport.shared.reset()
+    for row in [event, repost] {
+      try expect(TiebaThreadCardTarget.agreeTarget(row, personalized: true) == nil, "L03/L04 unknown card heart target is blocked")
+      try expect(TiebaThreadCardTarget.recommendationFeedback(row, personalized: true) == nil, "Feedback identity is unconfirmed")
+    }
+    let noWrites = await InteractionTransport.shared.calls
+    try expect(noWrites.isEmpty, "Ambiguous cards cannot send writes")
+    guard let topicTarget = TiebaThreadCardTarget.agreeTarget(topic, personalized: true),
+          let replyTarget = TiebaThreadCardTarget.agreeTarget(reply, personalized: true),
+          let siblingTarget = TiebaThreadCardTarget.agreeTarget(sibling, personalized: true) else {
+      throw FixtureFailure("Missing known thread-level interaction")
+    }
+    await PageTransport.shared.arrange([])
+    _ = try await TiebaThreadActionAPI.setFeedAgree(topicTarget, agree: true, validateSession: {})
+    _ = try await TiebaThreadActionAPI.setFeedAgree(topicTarget, agree: false, validateSession: {})
+    let topicReads = try await PageTransport.shared.pageRequests()
+    try expect(topicReads.isEmpty, "L01 known first floor requires no lookup")
+    let topicWrites = await InteractionTransport.shared.calls
+    try expect(topicWrites.count == 2 && topicWrites.allSatisfy {
+      $0.path == "/c/c/agree/opAgree" && $0.fields["thread_id"] == "123" && $0.fields["post_id"] == "789"
+        && $0.fields["obj_type"] == "3" && $0.fields["agree_type"] == "2" && $0.fields["fid"] == nil
+    }, "L01/L06 serialized coordinates and object type")
+    try expect(topicWrites.map { $0.fields["op_type"] } == ["0", "1"], "L06 agree and unagree share identity")
+
+    var verifiedReply = Tieba_PbPage_PbPageResponse()
+    verifiedReply.data.thread.id = 123
+    verifiedReply.data.thread.firstPostID = 789
+    var post = Tieba_Post()
+    post.id = 456
+    post.floor = 2
+    verifiedReply.data.postList = [post]
+    let verifiedBytes = try verifiedReply.serializedData()
+    await PageTransport.shared.arrange([.success(verifiedBytes)])
+    _ = try await TiebaThreadActionAPI.setFeedAgree(replyTarget, agree: true, validateSession: {})
+    let replyWrites = await InteractionTransport.shared.calls
+    try expect(replyWrites.count == 3 && replyWrites.last?.fields["post_id"] == "789", "L02 verified ordinary reply card retains the thread heart")
+    let replyReads = try await PageTransport.shared.pageRequests()
+    try expect(replyReads.count == 1 && replyReads[0].pid == 456 && replyReads[0].pn == 0, "L04 verify distinct reply anchor before writing")
+    await PageTransport.shared.arrange([.success(try pageData(kz: 123, pid: nil))])
+    do {
+      _ = try await TiebaThreadActionAPI.setFeedAgree(replyTarget, agree: true, validateSession: {})
+      throw FixtureFailure("Missing reply allowed a write")
+    } catch TiebaThreadPageError.missingAnchor {}
+    let afterMissing = await InteractionTransport.shared.calls
+    try expect(afterMissing.count == 3, "L05 missing PID sends no write")
+
+    var alternateFirst = Tieba_Post()
+    alternateFirst.id = 998
+    alternateFirst.floor = 1
+    verifiedReply.data.postList.append(alternateFirst)
+    await PageTransport.shared.arrange([.success(try verifiedReply.serializedData())])
+    do {
+      _ = try await TiebaThreadActionAPI.setFeedAgree(replyTarget, agree: true, validateSession: {})
+      throw FixtureFailure("Conflicting first floors allowed a write")
+    } catch TiebaThreadPageError.missingAnchor {}
+    let afterConflict = await InteractionTransport.shared.calls
+    try expect(afterConflict.count == 3, "L05 a matching reply cannot override conflicting first floors")
+
+    let active = TiebaMutex(true)
+    await PageTransport.shared.arrange([.success(verifiedBytes)]) { active.withLock { $0 = false } }
+    do {
+      _ = try await TiebaThreadActionAPI.setFeedAgree(replyTarget, agree: true) {
+        guard active.withLock({ $0 }) else { throw CancellationError() }
+      }
+      throw FixtureFailure("Account changed during reply lookup but write continued")
+    } catch is CancellationError {}
+    let invalidatedReads = try await PageTransport.shared.pageRequests()
+    let invalidatedWrites = await InteractionTransport.shared.calls
+    try expect(invalidatedReads.count == 1 && invalidatedWrites.count == 3, "L10 account change during lookup stops the write")
+
+    let topicWithoutFirst = TiebaViewModelMapper.mapProtoThread(["id": "901", "threadId": "123"])
+    guard let lookupTarget = TiebaThreadCardTarget.agreeTarget(topicWithoutFirst, personalized: true) else {
+      throw FixtureFailure("Missing topic lookup target")
+    }
+    await PageTransport.shared.arrange([.success(try pageData(kz: 321, pid: nil))])
+    do {
+      _ = try await TiebaThreadActionAPI.setFeedAgree(lookupTarget, agree: true, validateSession: {})
+      throw FixtureFailure("Mismatched topic provided a first floor")
+    } catch TiebaThreadPageError.missingAnchor {}
+    let mismatchWrites = await InteractionTransport.shared.calls
+    try expect(mismatchWrites.count == 3, "L01 mismatched topic cannot trigger a write")
+    await PageTransport.shared.arrange([.success(try pageData(kz: 123, pid: nil))])
+    _ = try await TiebaThreadActionAPI.setFeedAgree(lookupTarget, agree: true, validateSession: {})
+    let lookupReads = try await PageTransport.shared.pageRequests()
+    let lookupWrites = await InteractionTransport.shared.calls
+    try expect(
+      lookupReads.count == 1 && lookupReads[0].kz == 123 && !lookupReads[0].hasPid && lookupReads[0].pn == 1
+        && lookupWrites.count == 4 && lookupWrites.last?.fields["post_id"] == "999",
+      "L01 reads only the required first floor if missing from the card"
+    )
+
+    try await verifyAgreeState(topic: topicTarget, reply: replyTarget, sibling: siblingTarget)
+    guard let feedback = TiebaThreadCardTarget.recommendationFeedback(topic, personalized: true) else {
+      throw FixtureFailure("Missing ordinary recommendation feedback")
+    }
+    try expect(TiebaThreadCardTarget.ForumTarget(event)?.id == "1937070", "F02 local hiding uses the card forum")
+    let fullForum = TiebaThreadCardTarget.ForumTarget(["forumId": "1937070", "forumName": "yy小说吧"])
+    let nameOnly = TiebaThreadCardTarget.ForumTarget(["forumName": "yy小说吧"])
+    let anotherForum = TiebaThreadCardTarget.ForumTarget(["forumId": "1937071", "forumName": "yy小说吧"])
+    guard let fullForum, let nameOnly, let anotherForum else { throw FixtureFailure("Missing fixture forum") }
+    try expect(fullForum.matches(nameOnly) && !fullForum.matches(anotherForum), "F02 exact name fallback preserves a known FID conflict")
+    try expect(TiebaThreadCardTarget.forumFeedback(event, personalized: true) == nil, "F02 local hiding cannot send ambiguous feedback")
+    try expect(TiebaThreadCardTarget.forumFeedback(topic, personalized: true)?.forumId == "31", "F02 ordinary feedback uses the card forum")
+    await InteractionTransport.shared.reset()
+    try await TiebaFeedAPI.submitDislike(threadId: feedback.threadId, dislikeIds: "17", forumId: feedback.forumId)
+    let feedbackWrites = await InteractionTransport.shared.calls
+    guard let sent = feedbackWrites.first, let json = sent.fields["dislike"],
+          let rows = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]] else {
+      throw FixtureFailure("Feedback wire body absent")
+    }
+    try expect(
+      feedbackWrites.count == 1 && sent.path == "/c/c/excellent/submitDislike" && sent.fields["dislike_from"] == "homepage"
+        && (rows.first?["tid"] as? String) == "123" && (rows.first?["fid"] as? String) == "31"
+        && (rows.first?["dislike_ids"] as? String) == "17" && (rows.first?["extra"] as? String) == ""
+        && (rows.first?["click_time"] as? Int ?? 0) > 0,
+      "F01 preserves the serialized ordinary feedback fields"
+    )
+    guard let forumFeedback = TiebaThreadCardTarget.forumFeedback(topic, personalized: true) else {
+      throw FixtureFailure("Missing ordinary forum-feedback target")
+    }
+    try await TiebaFeedAPI.submitDislike(threadId: forumFeedback.threadId, dislikeIds: "7", forumId: forumFeedback.forumId)
+    let forumWrites = await InteractionTransport.shared.calls
+    guard let forumJSON = forumWrites.last?.fields["dislike"],
+          let forumRows = try JSONSerialization.jsonObject(with: Data(forumJSON.utf8)) as? [[String: Any]] else {
+      throw FixtureFailure("Missing forum-feedback form")
+    }
+    try expect(
+      forumWrites.count == 2 && (forumRows.first?["tid"] as? String) == "123"
+        && (forumRows.first?["fid"] as? String) == "31" && (forumRows.first?["dislike_ids"] as? String) == "7",
+      "F02 only the eligible topic sends reason 7 for its forum"
+    )
+    await InteractionTransport.shared.reset()
+    try await TiebaThreadActionAPI.setStore(threadId: share.threadId, firstPostId: "789", store: true)
+    try await TiebaThreadActionAPI.setStore(threadId: share.threadId, firstPostId: "789", store: false)
+    let stored = await InteractionTransport.shared.calls
+    try expect(
+      stored.count == 2 && stored[0].path == "/c/c/post/addstore"
+        && stored[0].fields["data"] == "[{\"tid\":\"11230786026\",\"pid\":\"789\",\"status\":1}]"
+        && stored[1].path == "/c/c/post/rmstore" && stored[1].fields["tid"] == "11230786026",
+      "R04 collection payload uses the opened thread KZ and its first floor"
+    )
+  }
+
+  static func verifyAgreeState(
+    topic: TiebaThreadCardTarget.AgreeTarget, reply: TiebaThreadCardTarget.AgreeTarget, sibling: TiebaThreadCardTarget.AgreeTarget
+  ) async throws {
+    var state = TiebaFeedAgreeState()
+    guard let original = state.begin(target: reply, account: "old", desired: false) else {
+      throw FixtureFailure("Cannot start unagree")
+    }
+    let duplicate = state.begin(target: reply, account: "old", desired: true)
+    try expect(duplicate == nil, "L08 a duplicate row cannot submit another write")
+    try expect(
+      state.desired(for: reply, account: "old") == false && state.desired(for: sibling, account: "old") == nil
+        && state.desired(for: topic, account: "old") == nil,
+      "L09 projection is isolated by reply anchor"
+    )
+    let baseline = TiebaFeedAgreeState.Count(liked: true, count: 0)
+    try expect(baseline.setting(false).count == 0, "Clamp optimistic decrement")
+    await InteractionTransport.shared.reset(code: 4)
+    do {
+      try await TiebaThreadActionAPI.setAgree(threadId: "123", postId: "789", agree: false)
+      throw FixtureFailure("Failed write became success")
+    } catch TiebaForumAPIError.api(4, _) {}
+    let failed = await InteractionTransport.shared.calls
+    try expect(failed.count == 1, "L07 business failure is one write")
+    let restored = state.finish(original)
+    let visible = state.desired(for: reply, account: "old").map { baseline.setting($0) } ?? baseline
+    try expect(restored && visible == baseline, "L07 failure restores the exact baseline")
+
+    await InteractionTransport.shared.reset()
+    guard let firstTap = state.begin(target: topic, account: "old", desired: true) else {
+      throw FixtureFailure("Missing first tap")
+    }
+    if let secondTap = state.begin(target: topic, account: "old", desired: false) {
+      _ = try await TiebaThreadActionAPI.setFeedAgree(topic, agree: secondTap.desired, validateSession: {})
+    }
+    _ = try await TiebaThreadActionAPI.setFeedAgree(topic, agree: firstTap.desired, validateSession: {})
+    let rapidWrites = await InteractionTransport.shared.calls
+    try expect(rapidWrites.count == 1 && rapidWrites.first?.fields["op_type"] == "0", "L08 two taps yield one serialized write")
+    _ = state.finish(firstTap)
+
+    let accepted = TiebaMutex(true)
+    await InteractionTransport.shared.reset()
+    do {
+      try await TiebaSession.$duringTbs.withValue({ accepted.withLock { $0 = false } }) {
+        try await TiebaThreadActionAPI.setAgree(threadId: "123", postId: "789", agree: true, validateSession: {
+          guard accepted.withLock({ $0 }) else { throw CancellationError() }
+        })
+      }
+      throw FixtureFailure("Old account write reached transport")
+    } catch is CancellationError {}
+    let oldWrites = await InteractionTransport.shared.calls
+    try expect(oldWrites.isEmpty, "L10 session change during credentials retrieval sends no write")
+    let old = state.begin(target: reply, account: "old", desired: true)
+    let new = state.begin(target: reply, account: "new", desired: false)
+    guard let old, new != nil else { throw FixtureFailure("New account cannot begin") }
+    let stale = state.finish(old)
+    try expect(!stale && state.desired(for: reply, account: "new") == false, "L10 old completion cannot clear new state")
   }
 
   static func feedRow(_ thread: Tieba_ThreadInfo) throws -> [String: Any] {
@@ -316,6 +651,7 @@ struct DynamicReplyRoutingTests {
     guard CommandLine.arguments.count == 2 else { throw FixtureFailure("Pass the descriptor file path") }
     let descriptors = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
     try TiebaProtoRegistry.shared.initialize(json: descriptors)
+    try await verifyInteractions()
     try verifyNavigationOwnership()
     try await verifyPersonalizedReply()
 

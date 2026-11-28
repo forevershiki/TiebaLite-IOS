@@ -421,10 +421,12 @@ final class TiebaTopicViewController: UIViewController, TiebaNativeScreen {
   }
 
   private func shareThread(_ index: Int) {
-    let id = value(index, "id")
-    guard !id.isEmpty else { return }
+    guard threads.indices.contains(index), let target = TiebaThreadCardTarget.card(threads[index]) else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
-    let url = "https://tieba.baidu.com/p/\(id)"
+    let url = "https://tieba.baidu.com/p/\(target.threadId)"
     let title = value(index, "title")
     let text = title.isEmpty ? url : "\(title)\n\(url)"
     TiebaShareSheet.present(text: text, from: self)

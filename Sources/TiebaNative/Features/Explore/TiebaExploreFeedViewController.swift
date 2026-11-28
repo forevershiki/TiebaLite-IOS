@@ -30,7 +30,9 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   /// FeedItem 形状（{type, threadInfo}），index 与列表行一一对应。
   private var items: [[String: Any]] = []
   private var expandedIds: Set<String> = []
-  private var likeMirror: [String: Bool] = [:]
+  private var likeMirror = TiebaFeedAgreeState()
+  private var itemsAccountKey = ""
+  private var hiddenForums: [String: Set<TiebaThreadCardTarget.ForumTarget>] = [:]
   private var pageTag = ""
   private var page = 1
   private var hasMore = false
@@ -110,6 +112,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       pill.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.82),
       pill.widthAnchor.constraint(lessThanOrEqualToConstant: TiebaLayout.floatingMaxWidth),
     ])
+    itemsAccountKey = TiebaPageCache.currentAccountKey()
     if let seed = seedItems() {
       items = seed
       publishFresh()
@@ -370,25 +373,34 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       showState(.login(text: "请先登录", secondary: "登录后查看关注动态"), animated: true)
       return
     }
+    let account = TiebaPageCache.currentAccountKey()
+    if itemsAccountKey != account {
+      itemsAccountKey = account
+      items.removeAll()
+      hasMore = false
+    }
+    let (observer, validate) = observeActionAccount(account)
     isLoading = true
     if items.isEmpty { showState(.loading) }
     Task { @MainActor in
       defer {
+        NotificationCenter.default.removeObserver(observer)
         isLoading = false
         isUserRefresh = false
         list.endRefreshing()
       }
       do {
         let result = try await fetch(page: 1)
+        try validate()
         pageTag = result.pageTag
-        items = result.items
+        items = locallyVisible(result.items, account: account)
         hasMore = result.hasMore
         page = 2
         lastLoadedAt = Date()
         isLoadingMore = false
         // 首屏成功即写 SWR 快照（下次冷启动首帧就有内容，且是新鲜的——旧实现
         // 只读不写，读到的是几个月前的死数据）。
-        TiebaFeedAPI.saveSnapshot(items, segment: segment.rawValue)
+        TiebaFeedAPI.saveSnapshot(result.items, segment: segment.rawValue, accountKey: account)
         publishFresh()
         if items.isEmpty {
           cancelPendingTopAnchorRefresh()
@@ -400,6 +412,10 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
         if isUserRefresh { TiebaSceneHaptics.fire("action-success") }
       } catch {
         cancelPendingTopAnchorRefresh()
+        guard (try? validate()) != nil else {
+          if items.isEmpty { showState(emptyState, animated: false) }
+          return
+        }
         if items.isEmpty {
           showState(.error(message: error.localizedDescription), animated: true)
         } else {
@@ -412,6 +428,9 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   private func loadMore() {
     guard hasMore, !isLoading, !isLoadingMore, page > 1 else { return }
+    let account = TiebaPageCache.currentAccountKey()
+    guard itemsAccountKey == account else { return }
+    let (observer, validate) = observeActionAccount(account)
     isLoadingMore = true
     list.footerState = .loading
     Task { @MainActor in
@@ -419,20 +438,23 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       // 见 TiebaKindFooterState）；只有这次翻页失败才留一颗可点的「重试」。
       var didFail = false
       defer {
+        NotificationCenter.default.removeObserver(observer)
         isLoadingMore = false
         list.footerState = didFail ? .retry : (hasMore ? .more : .none)
       }
       do {
         let result = try await fetch(page: page)
+        try validate()
         page += 1
         // 游标必须跟着翻页走：userLike 是 pageTag 游标分页，fetch 按 page == 1 ? "" : pageTag
         // 组请求体——只回写首屏那一份游标，第 3 页起会永远重发第 2 页的游标（走查 D9-1）。
         // 推荐段不用游标（按 page 翻页），原样赋值无副作用。
         pageTag = result.pageTag
         hasMore = result.hasMore
-        items.append(contentsOf: result.items)
+        items.append(contentsOf: locallyVisible(result.items, account: account))
         publishFresh()
       } catch {
+        guard (try? validate()) != nil else { return }
         didFail = true
         pill.showResult(success: false, text: "加载失败")
       }
@@ -526,8 +548,13 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
     // 本页 handleMenuAction —— 行字典开关与页面处理必须同生同灭（见 TiebaFeedRowModel）。
     options.cardContextMenu = true
     return items.map { item in
-      guard let thread = item["threadInfo"] as? [String: Any] else { return [:] }
+      guard var thread = item["threadInfo"] as? [String: Any] else { return [:] }
       let id = TiebaSimpleRowParser.string(thread["id"]) ?? ""
+      if !likeMirror.isEmpty, itemsAccountKey == TiebaPageCache.currentAccountKey(),
+         let target = TiebaThreadCardTarget.agreeTarget(thread, personalized: segment == .personalized),
+         let desired = likeMirror.desired(for: target, account: itemsAccountKey) {
+        Self.setLike(desired, in: &thread)
+      }
       return TiebaFeedRowBuilder.make(
         thread: thread,
         options: options,
@@ -585,7 +612,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       guard !id.isEmpty, expandedIds.insert(id).inserted else { return }
       TiebaSceneHaptics.fire("toggle")
       // 只改了一行的展开态：换页键会让全部行标识失效 → 整页 reload 重建（位图/图片全重贴）。
-      // 与话题页同动作、以及本页 applyLike 一致，走同页键 diff 只重配这一行。
+      // 与话题页的展开和本页点赞一致，走同页键 diff。
       publishInPlace()
     case "action":
       switch actionIndex {
@@ -649,18 +676,38 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   // MARK: - 动作
 
+  private enum CardReadAction {
+    case open
+    case share(title: String)
+  }
+
   private func openThread(_ thread: [String: Any], reference: Bool = false) {
+    resolveThreadAction(thread, reference: reference, action: .open)
+  }
+
+  private func resolveThreadAction(_ thread: [String: Any], reference: Bool = false, action: CardReadAction) {
     cancelReplyVerification()
     let opening = TiebaThreadCardTarget.opening(thread, personalized: segment == .personalized, reference: reference)
     #if DEBUG
     let source: TiebaReplyRoutingDiagnostics.Source = segment == .personalized ? .personalized : .concern
-    let tap = TiebaReplyRoutingDiagnostics.card(thread, target: opening.target, source: source, rule: opening.rule)
+    let tap: TiebaReplyRoutingDiagnostics.Tap?
+    if case .open = action {
+      tap = TiebaReplyRoutingDiagnostics.card(thread, target: opening.target, source: source, rule: opening.rule)
+    } else {
+      tap = nil
+    }
     #endif
     guard let target = opening.target else {
       pill.showResult(success: false, text: opening.rule.unresolvedMessage)
       return
     }
-    let navigate = { @MainActor in
+    let complete = { @MainActor [weak self] (verified: Bool) in
+      if case .share(let title) = action {
+        guard let self, let url = TiebaThreadCardTarget.shareURL(for: target, verifiedReply: verified, opening: opening.rule) else { return }
+        TiebaSceneHaptics.fire("press")
+        TiebaShareSheet.present(text: title.isEmpty ? url : "\(title)\n\(url)", from: self)
+        return
+      }
       TiebaSceneHaptics.fire("press")
       #if DEBUG
       TiebaReplyRoutingDiagnostics.$navigationTap.withValue(tap) {
@@ -671,7 +718,7 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
       #endif
     }
     guard opening.rule.requiresExactReply else {
-      navigate()
+      complete(false)
       return
     }
 
@@ -706,10 +753,15 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
         let verified = try await verify()
         #endif
         guard self?.finishReplyVerification(ticket, invalidated: sessionChanged.withLock { $0 }) == true else { return }
-        #if DEBUG
-        attempt?.verifiedForNavigation()
-        #endif
-        TiebaThreadAPI.$openingReplyPage.withValue(verified) { navigate() }
+        switch action {
+        case .open:
+          #if DEBUG
+          attempt?.verifiedForNavigation()
+          #endif
+          TiebaThreadAPI.$openingReplyPage.withValue(verified) { complete(true) }
+        case .share:
+          complete(true)
+        }
       } catch {
         guard let self, self.finishReplyVerification(
           ticket, invalidated: error is CancellationError || sessionChanged.withLock { $0 }
@@ -742,14 +794,8 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
   }
 
   private func shareThread(_ thread: [String: Any]) {
-    // 帖子本体 id 必须走与导航/点赞**同一个**解析：回复推荐卡的 id 是回复 pid，
-    // 拿它拼 /p/<pid> 只会分享出一个打不开的链接（分享按钮此前就是这条路径）。
-    guard let target = TiebaThreadCardTarget.card(thread) else { return }
-    let id = target.threadId
-    TiebaSceneHaptics.fire("press")
-    let url = "https://tieba.baidu.com/p/\(id)"
-    let title = value(thread, "title")
-    TiebaShareSheet.present(text: title.isEmpty ? url : "\(title)\n\(url)", from: self)
+    guard itemsAccountKey == TiebaPageCache.currentAccountKey() else { return }
+    resolveThreadAction(thread, action: .share(title: value(thread, "title")))
   }
 
   /// 复制帖子内容（长按卡片菜单）：标题 + 正文纯文本，**不含图片**。
@@ -762,79 +808,76 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
     pill.showResult(success: true, text: "已复制帖子内容")
   }
 
-  /// 点赞：乐观翻转 + 失败回滚（与帖子页/话题页同一竞态策略，镜像表防连点）。
   private func toggleLike(_ thread: [String: Any]) {
-    let id = value(thread, "id")
-    guard !id.isEmpty, let target = TiebaThreadCardTarget.interaction(thread),
-      let index = items.firstIndex(where: {
-      TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == id
-    }) else { return }
     guard isLoggedIn else {
       TiebaNavigator.shared.navigate(.login)
       return
     }
-    let latest = likeMirror[id] ?? (TiebaSimpleRowParser.bool(thread["hasAgree"]) ?? false)
-    let next = !latest
-    likeMirror[id] = next
+    guard let target = TiebaThreadCardTarget.agreeTarget(thread, personalized: segment == .personalized) else {
+      pill.showResult(success: false, text: "无法确认点赞对象，请在帖子详情中操作")
+      return
+    }
+    let account = TiebaPageCache.currentAccountKey()
+    guard itemsAccountKey == account else { return }
+    let next = !Self.likeCount(in: thread).liked
+    guard let ticket = likeMirror.begin(target: target, account: account, desired: next) else { return }
     TiebaSceneHaptics.fire("like")
-    applyLike(index, next)
-
-    // 与点击同一处解析：回复卡上 id 是 pid，不能当 threadId 发出去（否则赞错对象/请求失败）。
-    let knownFirstPostId = value(thread, "firstPostId")
+    publishInPlace()
+    let (observer, validate) = observeActionAccount(account)
     Task { @MainActor in
-      // 首楼 pid：帖级点赞（obj_type=3）的 post_id 必须是首楼 pid，不能拿帖子 id 顶上
-      //（服务端回"楼层不存在"）——issue #13：分享按钮右侧红心 100% 失败即此。
-      // 推荐流 ThreadInfo 不回首楼字段，缺了就按需解析（帖子页数据缓存可直接命中）。
-      guard let likePostId = await TiebaThreadActionAPI.resolveThreadFirstPostId(
-        threadId: target.threadId,
-        known: knownFirstPostId
-      ) else {
-        likeMirror[id] = latest
-        if let current = items.firstIndex(where: {
-          TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == id
-        }) {
-          applyLike(current, latest)
+      defer {
+        NotificationCenter.default.removeObserver(observer)
+        if likeMirror.finish(ticket), itemsAccountKey == TiebaPageCache.currentAccountKey() {
+          publishInPlace()
         }
-        TiebaSceneHaptics.fire("action-fail")
-        pill.showResult(success: false, text: "点赞失败，请稍后重试")
-        return
       }
       do {
-        try await TiebaThreadActionAPI.setAgree(
-          threadId: target.threadId,
-          postId: likePostId,
-          agree: next
-        )
+        let likePostId = try await TiebaThreadActionAPI.setFeedAgree(target, agree: next, validateSession: validate)
+        try validate()
+        if itemsAccountKey == account { commitLike(next, target: target, firstPostId: likePostId) }
         TiebaSceneHaptics.fire("action-success")
         pill.showResult(success: true, text: next ? "点赞成功" : "已取消点赞")
+      } catch is CancellationError {
+        return
       } catch {
-        if let vmError = error as? TiebaViewModelError, vmError.message.contains("点过赞") {
-          TiebaSceneHaptics.fire("action-success")
-          return
-        }
+        guard (try? validate()) != nil else { return }
         TiebaSceneHaptics.fire("action-fail")
-        likeMirror[id] = latest
-        // 回包期间 blockAuthor / removeForumRows / submitDislike 会删行、成功 reload 会整页
-        // 替换：捕获时的 index 可能已指向别行（indices.contains 挡不住）→ 按 id 现查再回滚。
-        if let current = items.firstIndex(where: {
-          TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == id
-        }) {
-          applyLike(current, latest)
-        }
-        pill.showResult(success: false, text: "点赞失败，请稍后重试")
+        pill.showResult(success: false, text: next ? "点赞失败，请稍后重试" : "取消点赞失败，请稍后重试")
       }
     }
   }
 
-  private func applyLike(_ index: Int, _ liked: Bool) {
-    guard items.indices.contains(index), var info = items[index]["threadInfo"] as? [String: Any] else {
-      return
+  private func commitLike(_ liked: Bool, target: TiebaThreadCardTarget.AgreeTarget, firstPostId: String) {
+    for index in items.indices {
+      guard var row = items[index]["threadInfo"] as? [String: Any],
+            let peer = TiebaThreadCardTarget.agreeTarget(row, personalized: segment == .personalized),
+            peer.threadId == target.threadId, peer.replyAnchor == target.replyAnchor,
+            peer.firstPostId == nil || peer.firstPostId == firstPostId
+      else { continue }
+      Self.setLike(liked, in: &row)
+      items[index]["threadInfo"] = row
     }
-    info["hasAgree"] = liked
-    let count = TiebaSimpleRowParser.double(info["zanNum"]) ?? 0
-    info["zanNum"] = max(0, count + (liked ? 1 : -1))
-    items[index]["threadInfo"] = info
-    publishInPlace()
+  }
+
+  private static func likeCount(in row: [String: Any]) -> TiebaFeedAgreeState.Count {
+    .init(liked: TiebaSimpleRowParser.bool(row["hasAgree"]) ?? false, count: TiebaSimpleRowParser.double(row["zanNum"]) ?? 0)
+  }
+
+  private static func setLike(_ liked: Bool, in row: inout [String: Any]) {
+    let result = likeCount(in: row).setting(liked)
+    row["hasAgree"] = result.liked
+    row["zanNum"] = result.count
+  }
+
+  private func observeActionAccount(_ account: String) -> (NSObjectProtocol, @Sendable () throws -> Void) {
+    let sessionChanged = TiebaMutex(false)
+    let observer = NotificationCenter.default.addObserver(
+      forName: TiebaSession.didChangeNotification, object: nil, queue: nil
+    ) { _ in sessionChanged.withLock { $0 = true } }
+    return (observer, {
+      try Task.checkCancellation()
+      guard TiebaPageCache.currentAccountKey() == account, !sessionChanged.withLock({ $0 }) else { throw CancellationError() }
+    })
   }
 
   private func blockAuthor(_ thread: [String: Any]) {
@@ -873,98 +916,93 @@ final class TiebaExploreFeedViewController: UIViewController, TiebaTabReselectab
 
   // MARK: - 屏蔽吧
 
-  /// 屏蔽这个吧 = 提交推荐流的不感兴趣理由「不想看这个吧」（Kotlin DislikeBtn 同一条
-  /// 链路：服务端收到该理由即不再推荐这个吧），成功后立刻收起本页该吧的所有行。
   private func blockForum(_ thread: [String: Any]) {
-    // 回复推荐卡上 id 是回复 pid：提交给服务端的必须是与进帖/点赞同一个帖子本体 id。
-    guard let target = TiebaThreadCardTarget.interaction(thread) else { return }
-    let threadId = target.threadId
-    let name = target.forumName ?? ""
-    let forumId = target.forumId ?? ""
-    Task { @MainActor in
-      do {
-        try await TiebaFeedAPI.submitDislike(
-          threadId: threadId,
-          dislikeIds: TiebaDislikeSheetViewController.forumReasonId,
-          forumId: forumId
-        )
-        TiebaSceneHaptics.fire("action-success")
-        pill.showResult(success: true, text: name.isEmpty ? "已屏蔽这个吧" : "已屏蔽 \(TiebaForumFormat.displayName(name))")
-        removeForumRows(name: name, threadId: threadId)
-      } catch {
-        TiebaSceneHaptics.fire("action-fail")
-        pill.showResult(success: false, text: "屏蔽失败，请稍后重试")
+    let account = TiebaPageCache.currentAccountKey()
+    guard itemsAccountKey == account, let forum = TiebaThreadCardTarget.ForumTarget(thread) else {
+      pill.showResult(success: false, text: "无法确认要隐藏的贴吧")
+      return
+    }
+    hiddenForums[account, default: []].insert(forum)
+    items = locallyVisible(items, account: account)
+    updateAfterRemovingRows()
+    pill.showResult(success: true, text: "已在本页隐藏这个吧")
+    if let target = TiebaThreadCardTarget.forumFeedback(thread, personalized: segment == .personalized) {
+      sendFeedback(target, ids: TiebaDislikeSheetViewController.forumReasonId, account: account) { [weak self] sent in
+        if sent { self?.pill.showResult(success: true, text: "已隐藏这个吧并提交推荐反馈") }
       }
     }
   }
 
-  /// 移除本页该吧的所有行（被点那行先折叠，同不感兴趣的退场时序）。吧名缺失的行
-  /// 只按帖子 id 命中那一行，不至于把同吧的行漏在外。
-  private func removeForumRows(name: String, threadId: String) {
-    let remove: () -> Void = { [weak self] in
-      guard let self else { return }
-      self.items.removeAll { item in
-        guard let info = item["threadInfo"] as? [String: Any] else { return false }
-        if !name.isEmpty, TiebaFeedRowFallback.forumName(info) == name { return true }
-        return TiebaSimpleRowParser.string(info["id"]) == threadId
-      }
-      if self.items.isEmpty {
-        self.showState(self.emptyState, animated: true)
-      } else {
-        self.publishFresh()
-      }
+  private func locallyVisible(_ rows: [[String: Any]], account: String) -> [[String: Any]] {
+    guard let hidden = hiddenForums[account], !hidden.isEmpty else { return rows }
+    return rows.filter { item in
+      guard let row = item["threadInfo"] as? [String: Any],
+            let forum = TiebaThreadCardTarget.ForumTarget(row) else { return true }
+      return !hidden.contains(where: { $0.matches(forum) })
     }
-    let index = items.firstIndex {
-      TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == threadId
-    }
-    guard let index else {
-      remove()
-      return
-    }
-    list.collapseRowThen(atIndex: index, remove: remove)
+  }
+
+  private func updateAfterRemovingRows() {
+    if items.isEmpty { showState(emptyState, animated: true) }
+    publishFresh()
   }
 
   // MARK: - 不感兴趣
 
-  /// 原因面板（原 BottomSheet）：系统 sheet + 多选列表（可多选，提交逗号串）。
   private func presentDislikeSheet(_ thread: [String: Any]) {
+    let account = TiebaPageCache.currentAccountKey()
+    guard itemsAccountKey == account,
+          let target = TiebaThreadCardTarget.recommendationFeedback(thread, personalized: segment == .personalized)
+    else {
+      pill.showResult(success: false, text: "这条动态的推荐反馈目标暂无法确认")
+      return
+    }
+    let cardId = value(thread, "id")
+    let postId = value(thread, "postId")
+    guard !cardId.isEmpty else { return }
     TiebaSceneHaptics.fire("sheet-present")
     let sheet = TiebaDislikeSheetViewController { [weak self] ids in
-      self?.submitDislike(thread, ids: ids)
+      guard let self, TiebaPageCache.currentAccountKey() == account else { return }
+      self.sendFeedback(target, ids: ids, account: account) { [weak self] sent in
+        guard let self else { return }
+        guard sent else {
+          self.pill.showResult(success: false, text: "提交失败，请稍后重试")
+          return
+        }
+        self.pill.showResult(success: true, text: "已减少此类内容推荐")
+        let matches: ([String: Any]) -> Bool = { item in
+          guard let row = item["threadInfo"] as? [String: Any] else { return false }
+          return self.value(row, "id") == cardId && self.value(row, "postId") == postId
+        }
+        guard let index = self.items.firstIndex(where: matches) else { return }
+        self.list.collapseRowThen(atIndex: index) { [weak self] in
+          guard let self, self.itemsAccountKey == account, TiebaPageCache.currentAccountKey() == account else { return }
+          self.items.removeAll(where: matches)
+          self.updateAfterRemovingRows()
+        }
+      }
     }
     present(sheet, animated: true)
   }
 
-  private func submitDislike(_ thread: [String: Any], ids: String) {
-    // 同 blockForum：不感兴趣要挂到帖子本体，回复卡的 pid 会让理由挂错对象。
-    guard let target = TiebaThreadCardTarget.interaction(thread) else { return }
-    let threadId = target.threadId
-    let forumId = target.forumId ?? ""
+  private func sendFeedback(
+    _ target: TiebaThreadCardTarget.FeedbackTarget, ids: String, account: String,
+    completion: @escaping @MainActor (Bool) -> Void
+  ) {
+    let (observer, validate) = observeActionAccount(account)
     Task { @MainActor in
+      defer { NotificationCenter.default.removeObserver(observer) }
       do {
-        try await TiebaFeedAPI.submitDislike(threadId: threadId, dislikeIds: ids, forumId: forumId)
+        try await TiebaFeedAPI.submitDislike(
+          threadId: target.threadId, dislikeIds: ids, forumId: target.forumId, validateSession: validate
+        )
+        try validate()
         TiebaSceneHaptics.fire("action-success")
-        pill.showResult(success: true, text: "已减少此类内容推荐")
-        // 先折叠再删数据（原 JS collapsingId + 360ms 兜底同一时序）：动画期间数据
-        // 保持在位，下面卡片等新快照落地才补位。
-        let index = items.firstIndex {
-          TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == threadId
-        }
-        guard let index else { return }
-        list.collapseRowThen(atIndex: index) { [weak self] in
-          guard let self else { return }
-          self.items.removeAll {
-            TiebaSimpleRowParser.string(($0["threadInfo"] as? [String: Any])?["id"]) == threadId
-          }
-          if self.items.isEmpty {
-            self.showState(self.emptyState, animated: true)
-          } else {
-            self.publishFresh()
-          }
-        }
+        completion(true)
       } catch {
+        guard (try? validate()) != nil else { return }
         TiebaSceneHaptics.fire("action-fail")
-        pill.showResult(success: false, text: "提交失败，请稍后重试")
+        completion(false)
       }
     }
   }

@@ -166,7 +166,10 @@ enum TiebaSocialAPI {
 
   /// 签名 JSON 通道（tiebac）。非 private：TiebaFeedAPI 的不感兴趣上报复用同一份
   /// common params / sign / st 参数（与 JS 的 apiPost 签名链同值）。
-  static func signedPost(path: String, fields: [String: String]) async throws -> [String: Any] {
+  static func signedPost(
+    path: String, fields: [String: String], validateSession: (@Sendable () throws -> Void)? = nil
+  ) async throws -> [String: Any] {
+    try validateSession?()
     var params = commonParams()
     params.merge(stParams()) { _, new in new }
     params.merge(fields) { _, new in new }
@@ -188,6 +191,7 @@ enum TiebaSocialAPI {
     if !snapshot.stoken.isEmpty { cookies.append("STOKEN=\(snapshot.stoken)") }
     if !cookies.isEmpty { headers["Cookie"] = cookies.joined(separator: "; ") }
 
+    try validateSession?()
     let response = try await TiebaHttpClient.shared.send(
       urlString: "https://tiebac.baidu.com\(path)",
       method: "POST",

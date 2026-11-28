@@ -6,15 +6,18 @@ private actor PageTransport {
   static let shared = PageTransport()
   private var responses: [Result<Data, TiebaClientError>] = []
   private var sent: [Data] = []
+  private var onRequest: (@Sendable () -> Void)?
 
-  func arrange(_ responses: [Result<Data, TiebaClientError>]) {
+  func arrange(_ responses: [Result<Data, TiebaClientError>], onRequest: (@Sendable () -> Void)? = nil) {
     self.responses = responses
+    self.onRequest = onRequest
     sent = []
     TiebaPageCache.shared.reset()
   }
 
   func send(_ request: Data) throws -> Data {
     sent.append(request)
+    onRequest?()
     guard !responses.isEmpty else { throw FixtureFailure("Unexpected extra request") }
     return try responses.removeFirst().get()
   }

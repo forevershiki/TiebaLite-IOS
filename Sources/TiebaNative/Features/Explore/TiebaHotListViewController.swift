@@ -379,9 +379,14 @@ final class TiebaHotListViewController: UIViewController, TiebaTabReselectable {
 
   /// 分享帖子：标题 + 帖子链接（与动态流/吧页同一条文案与同一分享面板）。
   private func shareThread(_ id: String) {
-    guard let index = hotIndex(ofThread: id) else { return }
+    guard let index = hotIndex(ofThread: id),
+          let target = TiebaThreadCardTarget.card(threads[index].row, allowLegacyTopicID: true)
+    else {
+      pill.showResult(success: false, text: TiebaThreadCardTarget.unresolvedMessage)
+      return
+    }
     TiebaSceneHaptics.fire("press")
-    let url = "https://tieba.baidu.com/p/\(id)"
+    let url = "https://tieba.baidu.com/p/\(target.threadId)"
     let title = TiebaSimpleRowParser.string(threads[index].row["title"]) ?? ""
     TiebaShareSheet.present(text: title.isEmpty ? url : "\(title)\n\(url)", from: self)
   }
